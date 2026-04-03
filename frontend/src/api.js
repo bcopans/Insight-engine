@@ -20,20 +20,55 @@ export async function deleteDocument(id) {
   return res.json();
 }
 
-export async function synthesize() {
-  const res = await fetch(`${BASE}/api/synthesize`, { method: 'POST' });
-  if (!res.ok) throw new Error('Synthesis failed');
-  return res.json();
+// SSE-based streaming synthesize
+export function streamSynthesize(handlers) {
+  const { onStatus, onComplete, onError } = handlers;
+  fetch(`${BASE}/api/synthesize`, { method: 'POST' })
+    .then(res => readSSE(res, { onStatus, onComplete, onError }))
+    .catch(e => onError(e.message));
 }
 
-export async function runAnalysis(themes) {
-  const res = await fetch(`${BASE}/api/analyze`, {
+// SSE-based streaming analyze
+export function streamAnalyze(themes, handlers) {
+  const { onAgent, onComplete, onError } = handlers;
+  fetch(`${BASE}/api/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ themes }),
-  });
-  if (!res.ok) throw new Error('Analysis failed');
-  return res.json();
+  })
+    .then(res => readSSE(res, { onAgent, onComplete, onError }))
+    .catch(e => onError(e.message));
+}
+
+// Generic SSE reader
+function readSSE(res, handlers) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const pump = () => reader.read().then(({ done, value }) => {
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    let event = null;
+    for (const line of lines) {
+      if (line.startsWith('event: ')) { event = line.slice(7).trim(); continue; }
+      if (line.startsWith('data: ') && event) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (event === 'status' && handlers.onStatus) handlers.onStatus(data);
+          if (event === 'agent' && handlers.onAgent) handlers.onAgent(data);
+          if (event === 'complete' && handlers.onComplete) handlers.onComplete(data);
+          if (event === 'error' && handlers.onError) handlers.onError(data.message);
+        } catch {}
+        event = null;
+      }
+    }
+    pump();
+  }).catch(e => handlers.onError && handlers.onError(e.message));
+
+  pump();
 }
 
 export async function parseRoadmap(file, text) {
