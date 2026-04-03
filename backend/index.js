@@ -2,252 +2,213 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const mammoth = require('mammoth');
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
+const {
+  RESEARCHER_SINGLE, MASTER_RESEARCHER, PM, ENGINEER,
+  DIRECTOR, PM_REBUTTAL, ROADMAP_EVALUATOR, ROADMAP_PARSER
+} = require('./prompts');
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
 app.use(express.json({ limit: '10mb' }));
 
-// ── Prompts ───────────────────────────────────────────────────────────────────
+// ── Core helpers ──────────────────────────────────────────────────────────────
 
-const ROADMAP_PARSER = `You are a product roadmap parser. Return ONLY a JSON array of roadmap items. No markdown, no explanation.
-Each item: { "id": number, "item": "string", "description": "string", "status": "planned"|"in-progress"|"shipped"|"unknown" }
-Return ONLY the JSON array.`;
-
-const RESEARCHER = `You are a senior user researcher. Your ONLY job is to faithfully represent what users said. You are strictly prohibited from suggesting solutions or features.
-
-Given feedback and existing themes, return ONLY this JSON:
-{
-  "themes": [
-    {
-      "id": "slug",
-      "title": "3-6 word problem statement (never a solution)",
-      "description": "What users are experiencing, grounded in what was said",
-      "sentiment": "positive|negative|mixed|frustrated|urgent",
-      "strength": 1-10,
-      "frequency": "number of distinct sources",
-      "isNew": boolean,
-      "quotes": ["verbatim quote 1", "verbatim quote 2"],
-      "ambiguities": ["what is still unclear"]
-    }
-  ],
-  "probingQuestions": ["sharp follow-up question"],
-  "researchGaps": ["area with weak or conflicting signal"]
-}
-
-Rules: 3-8 themes. Merge with existing (isNew: false if existing, strengthen if repeated). Titles must describe PROBLEMS not solutions. 4-6 probing questions. 2-4 research gaps. ONLY valid JSON.`;
-
-const PM = `You are an experienced product manager evaluating user research themes. You receive researcher output only — never raw transcripts.
-
-Given themes, return ONLY this JSON:
-{
-  "recommendations": [
-    {
-      "id": "slug",
-      "themeId": "researcher theme id",
-      "title": "What we should do (solution framing)",
-      "rationale": "Why this, why now",
-      "roadmapPlacement": "now|next|later|cut|new",
-      "roadmapItemId": null,
-      "userValue": 1-10,
-      "strategicFit": 1-10,
-      "confidenceScore": 1-10,
-      "risks": ["risk"],
-      "successMetrics": ["metric"]
-    }
-  ]
-}
-
-Note: roadmapPlacement assumes no roadmap context. Use "new" for net-new opportunities. ONLY valid JSON.`;
-
-const ENGINEER = `You are a pragmatic senior engineer evaluating PM recommendations for feasibility.
-
-Given recommendations, return ONLY this JSON:
-{
-  "estimates": [
-    {
-      "recommendationId": "slug",
-      "effort": "XS|S|M|L|XL",
-      "effortWeeks": "e.g. 1-2 weeks",
-      "complexity": "low|medium|high|very-high",
-      "dependencies": ["dependency"],
-      "technicalRisks": ["risk"],
-      "incrementalPath": "How to ship this in smaller pieces",
-      "redFlags": ["anything underscoped or naive"]
-    }
-  ],
-  "globalFlags": ["cross-cutting concern"]
-}
-
-Be realistic. Err pessimistic on effort. ONLY valid JSON.`;
-
-const DIRECTOR = `You are a commercially-minded product director stress-testing PM recommendations before they go to roadmap.
-
-Given recommendations and engineer estimates, return ONLY this JSON:
-{
-  "challenges": [
-    {
-      "recommendationId": "slug",
-      "type": "roi|timing|scope|strategy|evidence|effort|risk",
-      "challenge": "The hard question to the PM",
-      "severity": "blocker|major|minor",
-      "directorStance": "approve-pending-response|needs-revision|reject"
-    }
-  ],
-  "overallAssessment": "brief overall take",
-  "topPriority": "strongest recommendation and why",
-  "biggestConcern": "biggest worry about this plan"
-}
-
-Challenge every recommendation. Be direct. ONLY valid JSON.`;
-
-const PM_REBUTTAL = `You are the PM responding to director challenges. Defend with evidence, revise if fair, or concede if wrong.
-
-Given your recommendations and director challenges, return ONLY this JSON:
-{
-  "rebuttals": [
-    {
-      "challengeIndex": number,
-      "recommendationId": "slug",
-      "stance": "defend|revise|concede",
-      "response": "Your response",
-      "revisedRecommendation": "Updated text if revised, else null",
-      "revisedPlacement": "now|next|later|cut or null",
-      "revisedConfidence": number or null
-    }
-  ],
-  "finalSummary": "One paragraph exec-ready summary of what you're standing behind and what changed"
-}
-
-Cite specific evidence when defending. ONLY valid JSON.`;
-
-const ROADMAP_EVALUATOR = `You are a senior product strategist evaluating accumulated user research themes against a product roadmap.
-
-Given themes and roadmap items, return ONLY this JSON:
-{
-  "roadmapAnalysis": [
-    {
-      "roadmapItemId": number,
-      "coverage": "addresses|partial|gap|unrelated",
-      "rationale": "1 sentence"
-    }
-  ],
-  "roadmapConflicts": [
-    {
-      "roadmapItemId": number,
-      "issue": "What feedback suggests is wrong about this item's scope or priority",
-      "recommendation": "Cut|Rescope|Reprioritize|Validate further"
-    }
-  ],
-  "strategicGaps": [
-    {
-      "title": "Missing opportunity",
-      "evidence": "Which themes support this",
-      "urgency": "high|medium|low"
-    }
-  ]
-}
-
-Analyze every roadmap item. Be specific. ONLY valid JSON.`;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-async function callClaude(system, userMessage, fileData) {
-  const content = fileData
-    ? [
-        { type: fileData.isImage ? 'image' : 'document', source: { type: 'base64', media_type: fileData.mediaType, data: fileData.base64 } },
-        { type: 'text', text: userMessage }
-      ]
-    : userMessage;
-
+async function callClaude(system, userMessage) {
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 2000,
     system,
-    messages: [{ role: 'user', content }],
+    messages: [{ role: 'user', content: userMessage }],
   });
+  const raw = msg.content.map(b => b.text || '').join('');
+  return JSON.parse(raw.replace(/```json|```/g, '').trim());
+}
 
+async function callClaudeWithFile(system, userMessage, base64, mediaType, isImage) {
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 2000,
+    system,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: isImage ? 'image' : 'document', source: { type: 'base64', media_type: mediaType, data: base64 } },
+        { type: 'text', text: userMessage }
+      ]
+    }],
+  });
   const raw = msg.content.map(b => b.text || '').join('');
   return JSON.parse(raw.replace(/```json|```/g, '').trim());
 }
 
 async function extractText(file) {
-  const textTypes = ['text/plain', 'text/csv', 'text/markdown'];
-  if (textTypes.includes(file.mimetype)) return file.buffer.toString('utf8');
+  const name = file.originalname?.toLowerCase() || '';
+
+  // Word documents — use mammoth
+  if (name.endsWith('.docx') || file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    const result = await mammoth.extractRawText({ buffer: file.buffer });
+    return result.value;
+  }
+
+  // Plain text
+  if (['text/plain', 'text/csv', 'text/markdown'].includes(file.mimetype) || name.endsWith('.txt') || name.endsWith('.md')) {
+    return file.buffer.toString('utf8');
+  }
+
+  // PDF or image — send to Claude vision
+  const isImage = file.mimetype?.startsWith('image/');
+  const mediaType = file.mimetype || 'application/pdf';
+  const base64 = file.buffer.toString('base64');
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 2000,
     messages: [{
       role: 'user',
       content: [
-        { type: file.mimetype.startsWith('image/') ? 'image' : 'document', source: { type: 'base64', media_type: file.mimetype || 'application/pdf', data: file.buffer.toString('base64') } },
-        { type: 'text', text: 'Extract all text from this document. Return only raw text.' }
+        { type: isImage ? 'image' : 'document', source: { type: 'base64', media_type: mediaType, data: base64 } },
+        { type: 'text', text: 'Extract all text from this document. Return only raw text, no commentary.' }
       ]
     }]
   });
   return msg.content.map(b => b.text || '').join('');
 }
 
-// ── Routes ────────────────────────────────────────────────────────────────────
+// ── File upload & per-file research ──────────────────────────────────────────
 
-// Parse roadmap file/text → structured items
-app.post('/api/parse-roadmap', upload.single('file'), async (req, res) => {
+app.post('/api/upload', upload.array('files', 20), async (req, res) => {
+  if (!req.files?.length) return res.status(400).json({ error: 'No files provided' });
+
+  const results = [];
+
+  for (const file of req.files) {
+    try {
+      // 1. Extract text
+      const text = await extractText(file);
+
+      // 2. Run Researcher agent on this document
+      const researcherOut = await callClaude(
+        RESEARCHER_SINGLE,
+        `Document name: ${file.originalname}\n\nDocument content:\n${text.slice(0, 8000)}`
+      );
+
+      // 3. Save to Supabase
+      const { data, error } = await supabase.from('documents').insert([{
+        name: file.originalname,
+        extracted_text: text.slice(0, 50000), // cap storage
+        themes: researcherOut.themes,
+        document_summary: researcherOut.documentSummary,
+        key_source: researcherOut.keySource,
+        file_size: file.size,
+        mime_type: file.mimetype,
+      }]).select().single();
+
+      if (error) throw error;
+
+      results.push({
+        id: data.id,
+        name: data.name,
+        themes: data.themes,
+        documentSummary: data.document_summary,
+        keySource: data.key_source,
+        uploadedAt: data.created_at,
+      });
+    } catch (e) {
+      console.error(`Failed processing ${file.originalname}:`, e);
+      results.push({ name: file.originalname, error: e.message });
+    }
+  }
+
+  res.json(results);
+});
+
+// Get all uploaded documents
+app.get('/api/documents', async (req, res) => {
   try {
-    let text = req.body.text || '';
-    if (req.file) text = await extractText(req.file);
-    const items = await callClaude(ROADMAP_PARSER, `Parse this roadmap:\n\n${text}`);
-    res.json(Array.isArray(items) ? items : []);
+    const { data, error } = await supabase
+      .from('documents')
+      .select('id, name, themes, document_summary, key_source, file_size, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Roadmap parse failed' });
+    res.status(500).json({ error: 'Fetch failed' });
   }
 });
 
-// Main analysis pipeline: Researcher → PM → Engineer → Director → PM Rebuttal
+// Delete a document
+app.delete('/api/documents/:id', async (req, res) => {
+  try {
+    await supabase.from('documents').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// ── Synthesize all document themes → master theme model ───────────────────────
+
+app.post('/api/synthesize', async (req, res) => {
+  try {
+    // Load all documents with themes
+    const { data: docs, error } = await supabase
+      .from('documents')
+      .select('name, themes, document_summary, key_source')
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    if (!docs?.length) return res.status(400).json({ error: 'No documents uploaded yet' });
+
+    const perDocSummary = docs.map(d => ({
+      document: d.name,
+      source: d.key_source,
+      summary: d.document_summary,
+      themes: d.themes,
+    }));
+
+    const masterOut = await callClaude(
+      MASTER_RESEARCHER,
+      `Per-document theme sets from ${docs.length} documents:\n\n${JSON.stringify(perDocSummary, null, 2)}`
+    );
+
+    res.json(masterOut);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Synthesis failed' });
+  }
+});
+
+// ── Full analysis pipeline ────────────────────────────────────────────────────
+
 app.post('/api/analyze', async (req, res) => {
-  const { transcript, existingThemes = [] } = req.body;
-  if (!transcript) return res.status(400).json({ error: 'No transcript' });
+  const { themes } = req.body;
+  if (!themes?.length) return res.status(400).json({ error: 'No themes provided' });
 
   try {
-    // 1. Researcher
-    const researcherOut = await callClaude(
-      RESEARCHER,
-      `Feedback:\n${transcript}\n\nExisting themes:\n${existingThemes.length ? JSON.stringify(existingThemes) : 'none'}`
-    );
+    // PM
+    const pmOut = await callClaude(PM, `Research themes:\n${JSON.stringify(themes)}`);
 
-    // 2. PM
-    const pmOut = await callClaude(
-      PM,
-      `Research themes:\n${JSON.stringify(researcherOut.themes)}`
-    );
+    // Engineer
+    const engineerOut = await callClaude(ENGINEER, `PM Recommendations:\n${JSON.stringify(pmOut.recommendations)}`);
 
-    // 3. Engineer
-    const engineerOut = await callClaude(
-      ENGINEER,
-      `PM Recommendations:\n${JSON.stringify(pmOut.recommendations)}`
-    );
-
-    // 4. Director
+    // Director
     const directorOut = await callClaude(
       DIRECTOR,
       `PM Recommendations:\n${JSON.stringify(pmOut.recommendations)}\n\nEngineer Estimates:\n${JSON.stringify(engineerOut.estimates)}`
     );
 
-    // 5. PM Rebuttal
+    // PM Rebuttal
     const rebuttalOut = await callClaude(
       PM_REBUTTAL,
-      `Original recommendations:\n${JSON.stringify(pmOut.recommendations)}\n\nResearch themes (evidence):\n${JSON.stringify(researcherOut.themes)}\n\nDirector challenges:\n${JSON.stringify(directorOut.challenges)}`
+      `Original recommendations:\n${JSON.stringify(pmOut.recommendations)}\n\nResearch themes (evidence):\n${JSON.stringify(themes)}\n\nDirector challenges:\n${JSON.stringify(directorOut.challenges)}`
     );
 
     res.json({
-      themes: researcherOut.themes,
-      probingQuestions: researcherOut.probingQuestions,
-      researchGaps: researcherOut.researchGaps,
       recommendations: pmOut.recommendations,
       engineerEstimates: engineerOut.estimates,
       globalFlags: engineerOut.globalFlags,
@@ -264,24 +225,35 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// Separate roadmap evaluation — runs on demand against accumulated themes
+// ── Roadmap ───────────────────────────────────────────────────────────────────
+
+app.post('/api/parse-roadmap', upload.single('file'), async (req, res) => {
+  try {
+    let text = req.body.text || '';
+    if (req.file) text = await extractText(req.file);
+    const items = await callClaude(ROADMAP_PARSER, `Parse this roadmap:\n\n${text}`);
+    res.json(Array.isArray(items) ? items : []);
+  } catch (e) {
+    res.status(500).json({ error: 'Roadmap parse failed' });
+  }
+});
+
 app.post('/api/evaluate-roadmap', async (req, res) => {
   const { themes, roadmapItems } = req.body;
-  if (!themes?.length || !roadmapItems?.length) return res.status(400).json({ error: 'Missing themes or roadmap' });
-
+  if (!themes?.length || !roadmapItems?.length) return res.status(400).json({ error: 'Missing data' });
   try {
     const result = await callClaude(
       ROADMAP_EVALUATOR,
-      `User research themes:\n${JSON.stringify(themes)}\n\nRoadmap items:\n${JSON.stringify(roadmapItems)}`
+      `Themes:\n${JSON.stringify(themes)}\n\nRoadmap:\n${JSON.stringify(roadmapItems)}`
     );
     res.json(result);
   } catch (e) {
-    console.error(e);
     res.status(500).json({ error: 'Evaluation failed' });
   }
 });
 
-// Sessions
+// ── Sessions ──────────────────────────────────────────────────────────────────
+
 app.post('/api/sessions', async (req, res) => {
   try {
     const { data, error } = await supabase.from('sessions').insert([req.body]).select().single();
@@ -314,4 +286,4 @@ app.delete('/api/sessions/:id', async (req, res) => {
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`Insight Engine running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Insight Engine v4 running on port ${PORT}`));

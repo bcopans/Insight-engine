@@ -1,446 +1,363 @@
-import { useState, useRef } from 'react';
-import { analyzeTranscript, parseRoadmap, evaluateRoadmap, saveSession, getSessions, deleteSession } from './api';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  uploadFiles, getDocuments, deleteDocument,
+  synthesize, runAnalysis, parseRoadmap, evaluateRoadmap,
+  saveSession, getSessions, deleteSession
+} from './api';
 import './App.css';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-const sentimentBadge = {
-  positive:   { cls: 'badge-green',  label: 'Positive' },
-  negative:   { cls: 'badge-red',    label: 'Negative' },
-  mixed:      { cls: 'badge-yellow', label: 'Mixed' },
-  frustrated: { cls: 'badge-orange', label: 'Frustrated' },
-  urgent:     { cls: 'badge-red',    label: 'Urgent' },
-};
-const placementBadge = {
-  now:   { cls: 'badge-green',  label: 'Now' },
-  next:  { cls: 'badge-yellow', label: 'Next Quarter' },
-  later: { cls: 'badge-gray',   label: 'Later' },
-  cut:   { cls: 'badge-red',    label: 'Cut' },
-  new:   { cls: 'badge-purple', label: 'New Opportunity' },
-};
-const effortBadge = {
-  XS: { cls: 'badge-green',  label: 'XS' },
-  S:  { cls: 'badge-green',  label: 'S' },
-  M:  { cls: 'badge-yellow', label: 'M' },
-  L:  { cls: 'badge-orange', label: 'L' },
-  XL: { cls: 'badge-red',    label: 'XL' },
-};
-const coverageBadge = {
-  addresses: { cls: 'badge-green',  label: '✓ Addresses' },
-  partial:   { cls: 'badge-yellow', label: '~ Partial' },
-  gap:       { cls: 'badge-red',    label: '✗ Gap' },
-  unrelated: { cls: 'badge-gray',   label: '— Unrelated' },
-};
-const stanceBadge = {
-  defend:  { cls: 'badge-green',  label: '⚡ Defended' },
-  revise:  { cls: 'badge-yellow', label: '↻ Revised' },
-  concede: { cls: 'badge-red',    label: '✗ Conceded' },
-};
-const severityBadge = {
-  blocker: { cls: 'badge-red',    label: 'Blocker' },
-  major:   { cls: 'badge-orange', label: 'Major' },
-  minor:   { cls: 'badge-yellow', label: 'Minor' },
-};
+// ── Badge maps ────────────────────────────────────────────────────────────────
+const sentimentMap = { positive:'badge-green', negative:'badge-red', mixed:'badge-yellow', frustrated:'badge-orange', urgent:'badge-red' };
+const placementMap = { now:'badge-green', next:'badge-yellow', later:'badge-gray', cut:'badge-red', new:'badge-purple' };
+const placementLabel = { now:'Now', next:'Next Quarter', later:'Later', cut:'Cut', new:'New Opportunity' };
+const effortMap = { XS:'badge-green', S:'badge-green', M:'badge-yellow', L:'badge-orange', XL:'badge-red' };
+const coverageMap = { addresses:'badge-green', partial:'badge-yellow', gap:'badge-red', unrelated:'badge-gray' };
+const coverageLabel = { addresses:'✓ Addresses', partial:'~ Partial', gap:'✗ Gap', unrelated:'— Unrelated' };
+const stanceMap = { defend:'badge-green', revise:'badge-yellow', concede:'badge-red' };
+const stanceLabel = { defend:'⚡ Defended', revise:'↻ Revised', concede:'✗ Conceded' };
+const severityMap = { blocker:'badge-red', major:'badge-orange', minor:'badge-yellow' };
 
-function Badge({ type, map, label: overrideLabel }) {
-  const cfg = map?.[type] || { cls: 'badge-gray', label: type };
-  return <span className={`badge ${cfg.cls}`}>{overrideLabel || cfg.label}</span>;
+function Badge({ cls, children }) {
+  return <span className={`badge ${cls}`}>{children}</span>;
 }
 
-function ScoreBar({ value, color = '#2563eb' }) {
+function ScoreRow({ label, value, color }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <div className="signal-bar" style={{ flex: 1, margin: 0 }}>
-        <div className="signal-fill" style={{ width: `${value * 10}%`, background: color }} />
+    <div className="score-row">
+      <span className="score-label-text">{label}</span>
+      <div className="score-bar-wrap">
+        <div className="score-bar-fill" style={{ width:`${value*10}%`, background: color }} />
       </div>
-      <span style={{ fontSize: 12, fontWeight: 600, color: '#374151', width: 18 }}>{value}</span>
+      <span className="score-val">{value}</span>
     </div>
   );
 }
 
-function AgentRow({ label, status }) {
-  const icons = { idle: '○', running: '◌', done: '✓', error: '✕' };
+function Step({ label, status }) {
+  const icons = { idle:'○', running:'◌', done:'✓', error:'✕' };
   return (
-    <div className={`agent-row ${status}`}>
-      <span className={status === 'running' ? 'pulse' : ''} style={{ fontSize: 14 }}>{icons[status]}</span>
-      <span>{label}</span>
-      {status === 'running' && <span style={{ marginLeft: 'auto', fontSize: 11 }}>Running...</span>}
+    <div className={`step ${status}`}>
+      <span className={`step-dot${status==='running'?' pulse':''}`}>{icons[status]}</span>
+      <span className="step-label">{label}</span>
+      {status==='running' && <span className="step-running-label">Running...</span>}
     </div>
   );
+}
+
+function fileIcon(name='') {
+  const ext = name.split('.').pop().toLowerCase();
+  if (ext==='docx'||ext==='doc') return '📄';
+  if (ext==='pdf') return '📕';
+  if (['png','jpg','jpeg','gif'].includes(ext)) return '🖼';
+  return '📃';
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024*1024) return `${(bytes/1024).toFixed(0)}KB`;
+  return `${(bytes/(1024*1024)).toFixed(1)}MB`;
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState('analyze');
+  const [view, setView] = useState('files'); // files | results | sessions
 
-  // Transcript + themes
-  const [transcript, setTranscript]           = useState('');
-  const [existingThemes, setExistingThemes]   = useState([]);
-  const [sessionCount, setSessionCount]       = useState(0);
-  const [analyzing, setAnalyzing]             = useState(false);
-  const [analysisError, setAnalysisError]     = useState('');
-  const [agentStatus, setAgentStatus]         = useState({ researcher: 'idle', pm: 'idle', engineer: 'idle', director: 'idle', rebuttal: 'idle' });
+  // Documents
+  const [documents, setDocuments]         = useState([]);
+  const [uploading, setUploading]         = useState(false);
+  const [uploadProgress, setUploadProgress] = useState([]); // {name, status}
+  const [dragOver, setDragOver]           = useState(false);
+  const [docsLoading, setDocsLoading]     = useState(false);
 
-  // Results
-  const [themes, setThemes]                   = useState([]);
+  // Synthesis
+  const [synthesizing, setSynthesizing]   = useState(false);
+  const [masterThemes, setMasterThemes]   = useState([]);
   const [probingQuestions, setProbingQuestions] = useState([]);
-  const [researchGaps, setResearchGaps]       = useState([]);
+  const [researchGaps, setResearchGaps]   = useState([]);
+  const [crossCuttingInsights, setCrossCuttingInsights] = useState([]);
+  const [synthError, setSynthError]       = useState('');
+
+  // Analysis
+  const [analyzing, setAnalyzing]         = useState(false);
+  const [agentStatus, setAgentStatus]     = useState({ pm:'idle', engineer:'idle', director:'idle', rebuttal:'idle' });
   const [recommendations, setRecommendations] = useState([]);
   const [engineerEstimates, setEngineerEstimates] = useState([]);
   const [directorChallenges, setDirectorChallenges] = useState([]);
-  const [rebuttals, setRebuttals]             = useState([]);
-  const [finalSummary, setFinalSummary]       = useState('');
-  const [activeTab, setActiveTab]             = useState('themes');
+  const [rebuttals, setRebuttals]         = useState([]);
+  const [finalSummary, setFinalSummary]   = useState('');
+  const [analysisError, setAnalysisError] = useState('');
 
-  // Roadmap (optional)
-  const [showRoadmap, setShowRoadmap]         = useState(false);
-  const [roadmapText, setRoadmapText]         = useState('');
-  const [roadmapFile, setRoadmapFile]         = useState(null);
-  const [roadmapItems, setRoadmapItems]       = useState([]);
-  const [roadmapParsed, setRoadmapParsed]     = useState(false);
-  const [parsingRoadmap, setParsingRoadmap]   = useState(false);
-  const [roadmapError, setRoadmapError]       = useState('');
-
-  // Roadmap eval results
-  const [evaluating, setEvaluating]           = useState(false);
-  const [evaluated, setEvaluated]             = useState(false);
+  // Roadmap
+  const [showRoadmap, setShowRoadmap]     = useState(false);
+  const [roadmapText, setRoadmapText]     = useState('');
+  const [roadmapFile, setRoadmapFile]     = useState(null);
+  const [roadmapItems, setRoadmapItems]   = useState([]);
+  const [roadmapParsed, setRoadmapParsed] = useState(false);
+  const [parsingRoadmap, setParsingRoadmap] = useState(false);
+  const [evaluating, setEvaluating]       = useState(false);
+  const [evaluated, setEvaluated]         = useState(false);
   const [roadmapAnalysis, setRoadmapAnalysis] = useState([]);
   const [roadmapConflicts, setRoadmapConflicts] = useState([]);
-  const [strategicGaps, setStrategicGaps]     = useState([]);
-  const [evalError, setEvalError]             = useState('');
+  const [strategicGaps, setStrategicGaps] = useState([]);
 
-  // Sessions
-  const [sessions, setSessions]               = useState([]);
-  const [loadingSessions, setLoadingSessions] = useState(false);
-  const [saveStatus, setSaveStatus]           = useState('');
+  // UI
+  const [activeTab, setActiveTab]         = useState('themes');
+  const [expandedDocs, setExpandedDocs]   = useState({});
+  const [saveStatus, setSaveStatus]       = useState('');
+  const [sessions, setSessions]           = useState([]);
 
   const fileRef = useRef(null);
-  const hasResults = themes.length > 0;
+  const roadmapFileRef = useRef(null);
+  const hasResults = masterThemes.length > 0;
+  const hasAnalysis = recommendations.length > 0;
 
-  // ── Analyze ────────────────────────────────────────────────────────────────
-  const handleAnalyze = async () => {
-    if (!transcript.trim()) return;
-    setAnalyzing(true);
-    setAnalysisError('');
-    setAgentStatus({ researcher: 'running', pm: 'idle', engineer: 'idle', director: 'idle', rebuttal: 'idle' });
+  useEffect(() => { loadDocuments(); }, []);
+
+  const loadDocuments = async () => {
+    setDocsLoading(true);
+    try { setDocuments(await getDocuments()); } catch {}
+    setDocsLoading(false);
+  };
+
+  // ── File upload ────────────────────────────────────────────────────────────
+  const handleFiles = useCallback(async (files) => {
+    if (!files.length) return;
+    setUploading(true);
+    setUploadProgress(files.map(f => ({ name: f.name, status: 'processing' })));
 
     try {
-      const result = await analyzeTranscript(transcript, existingThemes);
+      const results = await uploadFiles(files);
+      setUploadProgress(results.map(r => ({ name: r.name, status: r.error ? 'error' : 'done' })));
+      await loadDocuments();
+      setTimeout(() => setUploadProgress([]), 3000);
+    } catch (e) {
+      setUploadProgress(files.map(f => ({ name: f.name, status: 'error' })));
+    } finally {
+      setUploading(false);
+    }
+  }, []);
 
-      setAgentStatus({ researcher: 'done', pm: 'done', engineer: 'done', director: 'done', rebuttal: 'done' });
+  const onDropZoneChange = (e) => handleFiles(Array.from(e.target.files));
+  const onDrop = (e) => {
+    e.preventDefault(); setDragOver(false);
+    handleFiles(Array.from(e.dataTransfer.files));
+  };
 
-      // Merge themes
-      const existingMap = Object.fromEntries(existingThemes.map(t => [t.id, t]));
-      const merged = (result.themes || []).map(t => {
-        const ex = existingMap[t.id];
-        if (ex) return { ...ex, ...t, strength: Math.min(10, ex.strength + (t.strength > 5 ? 1 : 0)), isNew: false };
-        return { ...t };
-      });
-      existingThemes.forEach(t => { if (!merged.find(m => m.id === t.id)) merged.push({ ...t }); });
-      const sorted = merged.sort((a, b) => b.strength - a.strength);
+  const handleDeleteDoc = async (id) => {
+    try { await deleteDocument(id); setDocuments(d => d.filter(x => x.id !== id)); } catch {}
+  };
 
-      setThemes(sorted);
-      setExistingThemes(sorted);
+  // ── Synthesize ─────────────────────────────────────────────────────────────
+  const handleSynthesize = async () => {
+    setSynthesizing(true); setSynthError('');
+    try {
+      const result = await synthesize();
+      setMasterThemes(result.themes || []);
       setProbingQuestions(result.probingQuestions || []);
       setResearchGaps(result.researchGaps || []);
+      setCrossCuttingInsights(result.crossCuttingInsights || []);
+      setRecommendations([]); setEngineerEstimates([]); setDirectorChallenges([]);
+      setRebuttals([]); setFinalSummary(''); setEvaluated(false);
+      setView('results'); setActiveTab('themes');
+    } catch (e) {
+      setSynthError('Synthesis failed. Make sure you have documents uploaded.');
+    } finally { setSynthesizing(false); }
+  };
+
+  // ── Run analysis ───────────────────────────────────────────────────────────
+  const handleRunAnalysis = async () => {
+    if (!masterThemes.length) return;
+    setAnalyzing(true); setAnalysisError('');
+    setAgentStatus({ pm:'running', engineer:'idle', director:'idle', rebuttal:'idle' });
+    try {
+      const result = await runAnalysis(masterThemes);
+      setAgentStatus({ pm:'done', engineer:'done', director:'done', rebuttal:'done' });
       setRecommendations(result.recommendations || []);
       setEngineerEstimates(result.engineerEstimates || []);
       setDirectorChallenges(result.directorChallenges || []);
       setRebuttals(result.rebuttals || []);
       setFinalSummary(result.finalSummary || '');
-      setSessionCount(c => c + 1);
-      setTranscript('');
-      setActiveTab('themes');
-      setEvaluated(false);
+      setActiveTab('recommendations');
     } catch (e) {
-      setAnalysisError('Analysis failed. Check your API connection and try again.');
-      setAgentStatus({ researcher: 'error', pm: 'error', engineer: 'error', director: 'error', rebuttal: 'error' });
-    } finally {
-      setAnalyzing(false);
-    }
+      setAnalysisError('Analysis failed. Try again.');
+      setAgentStatus({ pm:'error', engineer:'error', director:'error', rebuttal:'error' });
+    } finally { setAnalyzing(false); }
   };
 
-  // ── Parse roadmap ──────────────────────────────────────────────────────────
+  // ── Roadmap ────────────────────────────────────────────────────────────────
   const handleParseRoadmap = async () => {
-    if (!roadmapFile && !roadmapText.trim()) return;
     setParsingRoadmap(true);
-    setRoadmapError('');
     try {
       const items = await parseRoadmap(roadmapFile, roadmapText);
       setRoadmapItems(Array.isArray(items) ? items : []);
       setRoadmapParsed(true);
-    } catch (e) {
-      setRoadmapError('Could not parse roadmap. Try pasting text directly.');
-    } finally {
-      setParsingRoadmap(false);
-    }
+    } catch {}
+    setParsingRoadmap(false);
   };
 
-  // ── Evaluate against roadmap ───────────────────────────────────────────────
   const handleEvaluate = async () => {
-    if (!themes.length || !roadmapItems.length) return;
     setEvaluating(true);
-    setEvalError('');
     try {
-      const result = await evaluateRoadmap(themes, roadmapItems);
+      const result = await evaluateRoadmap(masterThemes, roadmapItems);
       setRoadmapAnalysis(result.roadmapAnalysis || []);
       setRoadmapConflicts(result.roadmapConflicts || []);
       setStrategicGaps(result.strategicGaps || []);
-      setEvaluated(true);
-      setActiveTab('roadmap');
-    } catch (e) {
-      setEvalError('Evaluation failed. Try again.');
-    } finally {
-      setEvaluating(false);
-    }
+      setEvaluated(true); setActiveTab('roadmap');
+    } catch {}
+    setEvaluating(false);
   };
 
-  // ── Save session ───────────────────────────────────────────────────────────
+  // ── Save / Sessions ────────────────────────────────────────────────────────
   const handleSave = async () => {
     setSaveStatus('saving');
     try {
-      await saveSession({
-        themes, probingQuestions, researchGaps, recommendations,
-        engineerEstimates, directorChallenges, rebuttals, finalSummary,
-        roadmapItems, roadmapAnalysis, roadmapConflicts, strategicGaps,
-        session_count: sessionCount,
-      });
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus(''), 2500);
-    } catch {
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus(''), 2500);
-    }
+      await saveSession({ masterThemes, probingQuestions, researchGaps, crossCuttingInsights, recommendations, engineerEstimates, directorChallenges, rebuttals, finalSummary, roadmapItems, roadmapAnalysis, roadmapConflicts, strategicGaps });
+      setSaveStatus('saved'); setTimeout(() => setSaveStatus(''), 2500);
+    } catch { setSaveStatus('error'); setTimeout(() => setSaveStatus(''), 2500); }
   };
 
   const handleLoadSessions = async () => {
     setView('sessions');
-    setLoadingSessions(true);
     try { setSessions(await getSessions()); } catch {}
-    setLoadingSessions(false);
   };
 
   const handleLoadSession = (s) => {
-    setThemes(s.themes || []);
-    setExistingThemes(s.themes || []);
+    setMasterThemes(s.masterThemes || []);
     setProbingQuestions(s.probingQuestions || []);
     setResearchGaps(s.researchGaps || []);
+    setCrossCuttingInsights(s.crossCuttingInsights || []);
     setRecommendations(s.recommendations || []);
     setEngineerEstimates(s.engineerEstimates || []);
     setDirectorChallenges(s.directorChallenges || []);
     setRebuttals(s.rebuttals || []);
     setFinalSummary(s.finalSummary || '');
     setRoadmapItems(s.roadmapItems || []);
-    setRoadmapParsed((s.roadmapItems || []).length > 0);
     setRoadmapAnalysis(s.roadmapAnalysis || []);
     setRoadmapConflicts(s.roadmapConflicts || []);
     setStrategicGaps(s.strategicGaps || []);
     setEvaluated((s.roadmapAnalysis || []).length > 0);
-    setSessionCount(s.session_count || 0);
-    setView('analyze');
-    setActiveTab('themes');
+    setRoadmapParsed((s.roadmapItems || []).length > 0);
+    setView('results'); setActiveTab('themes');
   };
 
-  const handleDeleteSession = async (id) => {
-    try { await deleteSession(id); setSessions(s => s.filter(x => x.id !== id)); } catch {}
-  };
-
-  const rising = themes.filter(t => t.strength >= 7);
+  const rising = masterThemes.filter(t => t.strength >= 7);
   const tabs = [
-    { key: 'themes',          label: `Themes (${themes.length})` },
-    { key: 'questions',       label: `Follow-up Questions` },
-    { key: 'recommendations', label: `Recommendations (${recommendations.length})` },
-    { key: 'deliberation',    label: 'Deliberation' },
-    ...(evaluated ? [{ key: 'roadmap', label: 'Roadmap Evaluation' }] : []),
+    { key:'themes', label:`Themes (${masterThemes.length})` },
+    { key:'questions', label:'Follow-up Questions' },
+    ...(hasAnalysis ? [
+      { key:'recommendations', label:`Recommendations (${recommendations.length})` },
+      { key:'deliberation', label:'Deliberation' },
+    ] : []),
+    ...(evaluated ? [{ key:'roadmap', label:'Roadmap Eval' }] : []),
   ];
 
   return (
     <div className="app">
-
-      {/* ── Header ── */}
+      {/* Header */}
       <header className="header">
         <div>
           <div className="logo">Insight Engine</div>
           <div className="logo-sub">User Research Intelligence</div>
         </div>
-        <nav className="nav">
-          <button className={`nav-btn${view === 'analyze' ? ' active' : ''}`} onClick={() => setView('analyze')}>Analyze</button>
-          <button className={`nav-btn${view === 'sessions' ? ' active' : ''}`} onClick={handleLoadSessions}>Sessions</button>
-        </nav>
+        <div className="header-center">
+          <button className={`nav-btn${view==='files'?' active':''}`} onClick={() => setView('files')}>
+            📁 Documents {documents.length > 0 && `(${documents.length})`}
+          </button>
+          <button className={`nav-btn${view==='results'?' active':''}`} onClick={() => setView('results')} disabled={!hasResults}>
+            🔬 Analysis {hasResults && `(${masterThemes.length} themes)`}
+          </button>
+          <button className={`nav-btn${view==='sessions'?' active':''}`} onClick={handleLoadSessions}>
+            💾 Sessions
+          </button>
+        </div>
         <div className="header-right">
-          {sessionCount > 0 && (
-            <span style={{ fontSize: 12, color: '#64748b' }}>{sessionCount} run{sessionCount !== 1 ? 's' : ''}</span>
-          )}
-          {rising.length > 0 && (
-            <span className="badge badge-orange pulse">⚡ {rising.length} Rising Signal{rising.length > 1 ? 's' : ''}</span>
-          )}
+          {rising.length > 0 && <Badge cls="badge-orange"><span className="pulse">⚡</span> {rising.length} Rising</Badge>}
           {hasResults && (
-            <button className="btn-secondary" style={{ fontSize: 12, padding: '6px 14px' }} onClick={handleSave} disabled={saveStatus === 'saving'}>
-              {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'error' ? 'Error' : 'Save Session'}
+            <button className="btn-secondary btn-sm" onClick={handleSave} disabled={saveStatus==='saving'}>
+              {saveStatus==='saving'?'Saving...':saveStatus==='saved'?'✓ Saved':'Save Session'}
             </button>
           )}
         </div>
       </header>
 
-      {/* ── Sessions view ── */}
-      {view === 'sessions' && (
+      {/* ── Files view ── */}
+      {view==='files' && (
         <div className="page fade-in">
-          <div className="page-title">Saved Sessions</div>
-          <div className="page-sub">Load a previous session to continue building on accumulated themes.</div>
-          {loadingSessions && <div style={{ color: '#64748b', textAlign: 'center', padding: 40 }}>Loading...</div>}
-          {!loadingSessions && sessions.length === 0 && (
-            <div className="empty">
-              <div className="empty-icon">📂</div>
-              <div className="empty-title">No saved sessions yet</div>
-              <div className="empty-sub">Run an analysis and hit Save Session to store your work.</div>
-            </div>
-          )}
-          {sessions.map(s => (
-            <div key={s.id} className="session-card">
-              <div>
-                <div style={{ fontWeight: 600, color: '#1a1f2e', marginBottom: 4 }}>
-                  {new Date(s.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                </div>
-                <div style={{ fontSize: 12, color: '#64748b' }}>
-                  {s.themes?.length || 0} themes · {s.session_count || 0} feedback runs · {s.recommendations?.length || 0} recommendations
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn-primary" style={{ fontSize: 12, padding: '7px 14px' }} onClick={() => handleLoadSession(s)}>Load</button>
-                <button className="btn-danger" onClick={() => handleDeleteSession(s.id)}>Delete</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ── Main analyze view ── */}
-      {view === 'analyze' && (
-        <div className="page">
           <div className="two-col">
-
-            {/* ── Left column ── */}
+            {/* Left: Upload */}
             <div className="left-col">
-
-              {/* Feedback input */}
               <div className="panel">
-                <div className="panel-title">① Paste Feedback</div>
-                <textarea
-                  value={transcript}
-                  onChange={e => setTranscript(e.target.value)}
-                  disabled={analyzing}
-                  placeholder="Interview transcript, meeting notes, survey responses, support tickets..."
-                  style={{ minHeight: 180 }}
-                />
-                {analysisError && (
-                  <div style={{ color: '#dc2626', fontSize: 12, marginTop: 8, padding: '8px 12px', background: '#fef2f2', borderRadius: 6 }}>
-                    {analysisError}
-                  </div>
-                )}
-                <button
-                  className="btn-primary"
-                  style={{ width: '100%', marginTop: 12 }}
-                  onClick={handleAnalyze}
-                  disabled={analyzing || !transcript.trim()}
+                <div className="panel-title">Upload Feedback Documents</div>
+                <div
+                  className={`drop-zone${dragOver?' drag-over':''}`}
+                  onClick={() => fileRef.current?.click()}
+                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={onDrop}
                 >
-                  {analyzing ? '⏳ Agents analyzing...' : sessionCount === 0 ? 'Run Analysis' : 'Add More Feedback'}
-                </button>
-                {existingThemes.length > 0 && !analyzing && (
-                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 8, textAlign: 'center' }}>
-                    {existingThemes.length} accumulated themes will be merged
+                  <input ref={fileRef} type="file" multiple accept=".docx,.doc,.pdf,.txt,.md,.png,.jpg" style={{display:'none'}} onChange={onDropZoneChange} />
+                  <div className="drop-zone-icon">{uploading ? <span className="spin">⏳</span> : '📂'}</div>
+                  <div className="drop-zone-title">{uploading ? 'Processing files...' : 'Drop files here or click to browse'}</div>
+                  <div className="drop-zone-sub">Word docs, PDFs, text files · Multiple files supported</div>
+                </div>
+
+                {uploadProgress.length > 0 && (
+                  <div style={{marginTop:12}}>
+                    {uploadProgress.map((f,i) => (
+                      <div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',fontSize:12}}>
+                        <span>{fileIcon(f.name)}</span>
+                        <span style={{flex:1,color:'#374151',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.name}</span>
+                        <span className={`file-status ${f.status}`}>
+                          {f.status==='processing'?<span className="pulse">Processing...</span>:f.status==='done'?'✓ Done':'✗ Error'}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
 
-              {/* Agent pipeline */}
-              {analyzing && (
-                <div className="panel fade-in">
-                  <div className="panel-title">Agent Pipeline</div>
-                  <AgentRow label="Researcher — defining problems" status={agentStatus.researcher} />
-                  <AgentRow label="PM — recommending solutions" status={agentStatus.pm} />
-                  <AgentRow label="Engineer — estimating effort" status={agentStatus.engineer} />
-                  <AgentRow label="Director — challenging the plan" status={agentStatus.director} />
-                  <AgentRow label="PM — defending or revising" status={agentStatus.rebuttal} />
-                </div>
-              )}
-
-              {/* Optional roadmap */}
+              {/* Roadmap panel */}
               <div className="panel">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: showRoadmap ? 14 : 0 }}>
-                  <div className="panel-title" style={{ margin: 0 }}>② Roadmap <span className="badge badge-gray" style={{ marginLeft: 6, fontSize: 10 }}>Optional</span></div>
-                  <button className="btn-secondary" style={{ fontSize: 11, padding: '5px 12px' }} onClick={() => setShowRoadmap(s => !s)}>
-                    {showRoadmap ? 'Hide' : 'Add Roadmap'}
-                  </button>
+                <div className="panel-title">
+                  <span>Roadmap <Badge cls="badge-gray">Optional</Badge></span>
+                  <button className="btn-secondary btn-sm" onClick={() => setShowRoadmap(s=>!s)}>{showRoadmap?'Hide':'Add'}</button>
                 </div>
-
                 {showRoadmap && (
                   <div className="fade-in">
                     {!roadmapParsed ? (
                       <>
-                        <div
-                          className={`upload-zone${roadmapFile ? ' has-file' : ''}`}
-                          onClick={() => fileRef.current?.click()}
-                        >
-                          <input
-                            ref={fileRef}
-                            type="file"
-                            accept=".pdf,.txt,.md,.csv,.png,.jpg"
-                            style={{ display: 'none' }}
-                            onChange={e => { setRoadmapFile(e.target.files[0] || null); setRoadmapText(''); }}
-                          />
-                          {roadmapFile
-                            ? <><div style={{ fontWeight: 600, color: '#15803d' }}>✓ {roadmapFile.name}</div><div style={{ fontSize: 12, color: '#64748b', marginTop: 3 }}>Click to change</div></>
-                            : <><div style={{ fontWeight: 500, color: '#374151' }}>Upload file</div><div style={{ fontSize: 12, color: '#9ca3af', marginTop: 3 }}>PDF, TXT, MD, image</div></>
-                          }
+                        <div className="drop-zone" style={{padding:16}} onClick={() => roadmapFileRef.current?.click()}>
+                          <input ref={roadmapFileRef} type="file" accept=".docx,.pdf,.txt,.md" style={{display:'none'}} onChange={e => { setRoadmapFile(e.target.files[0]); setRoadmapText(''); }} />
+                          {roadmapFile ? <div style={{fontSize:13,color:'#15803d',fontWeight:600}}>✓ {roadmapFile.name}</div> : <div style={{fontSize:13,color:'#6b7280'}}>Upload roadmap file</div>}
                         </div>
-                        <div style={{ textAlign: 'center', fontSize: 12, color: '#9ca3af', margin: '10px 0' }}>or paste text</div>
-                        <textarea
-                          value={roadmapText}
-                          onChange={e => { setRoadmapText(e.target.value); setRoadmapFile(null); }}
-                          placeholder={'Q3 Roadmap\n- Self-serve campaign builder\n- Closed-loop attribution\n...'}
-                          style={{ minHeight: 80 }}
-                        />
-                        {roadmapError && <div style={{ color: '#dc2626', fontSize: 12, marginTop: 6 }}>{roadmapError}</div>}
-                        <button
-                          className="btn-secondary"
-                          style={{ width: '100%', marginTop: 10 }}
-                          onClick={handleParseRoadmap}
-                          disabled={parsingRoadmap || (!roadmapFile && !roadmapText.trim())}
-                        >
-                          {parsingRoadmap ? '⏳ Parsing...' : 'Parse Roadmap'}
+                        <div style={{textAlign:'center',fontSize:12,color:'#9ca3af',margin:'8px 0'}}>or paste text</div>
+                        <textarea value={roadmapText} onChange={e=>{setRoadmapText(e.target.value);setRoadmapFile(null);}} placeholder={'Q3 Roadmap\n- Feature A\n- Feature B...'} style={{minHeight:70,fontSize:12}} />
+                        <button className="btn-secondary" style={{width:'100%',marginTop:10}} onClick={handleParseRoadmap} disabled={parsingRoadmap||(!roadmapFile&&!roadmapText.trim())}>
+                          {parsingRoadmap?'Parsing...':'Parse Roadmap'}
                         </button>
                       </>
                     ) : (
                       <>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                          <span className="badge badge-green">✓ {roadmapItems.length} items loaded</span>
-                          <button className="btn-secondary" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => { setRoadmapParsed(false); setRoadmapItems([]); setEvaluated(false); }}>Change</button>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                          <Badge cls="badge-green">✓ {roadmapItems.length} items loaded</Badge>
+                          <button className="btn-secondary btn-sm" onClick={()=>{setRoadmapParsed(false);setRoadmapItems([]);setEvaluated(false);}}>Change</button>
                         </div>
-                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                        <div style={{maxHeight:150,overflowY:'auto',marginBottom:10}}>
                           {roadmapItems.map(r => {
-                            const ev = roadmapAnalysis.find(a => a.roadmapItemId === r.id);
+                            const ev = roadmapAnalysis.find(a=>a.roadmapItemId===r.id);
                             return (
-                              <div key={r.id} style={{ padding: '6px 10px', marginBottom: 4, background: '#f8f9fb', borderRadius: 6, border: '1px solid #e2e6ed', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                                <span style={{ color: '#374151', flex: 1 }}>{r.item}</span>
-                                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                                  <span className={`badge ${r.status === 'shipped' ? 'badge-green' : r.status === 'in-progress' ? 'badge-yellow' : 'badge-blue'}`} style={{ fontSize: 10 }}>{r.status}</span>
-                                  {ev && <span className={`badge ${coverageBadge[ev.coverage]?.cls}`} style={{ fontSize: 10 }}>{coverageBadge[ev.coverage]?.label}</span>}
-                                </div>
+                              <div key={r.id} style={{padding:'5px 8px',marginBottom:3,background:'#f8f9fb',borderRadius:5,border:'1px solid #e2e6ed',fontSize:12,display:'flex',justifyContent:'space-between',gap:6}}>
+                                <span style={{color:'#374151',flex:1}}>{r.item}</span>
+                                {ev && <Badge cls={coverageMap[ev.coverage]}>{coverageLabel[ev.coverage]}</Badge>}
                               </div>
                             );
                           })}
                         </div>
                         {hasResults && (
-                          <div style={{ marginTop: 12 }}>
-                            {evalError && <div style={{ color: '#dc2626', fontSize: 12, marginBottom: 8 }}>{evalError}</div>}
-                            <button
-                              className="btn-purple"
-                              style={{ width: '100%' }}
-                              onClick={handleEvaluate}
-                              disabled={evaluating}
-                            >
-                              {evaluating ? '⏳ Evaluating...' : evaluated ? '↻ Re-evaluate Against Roadmap' : '🗺 Evaluate Against Roadmap'}
-                            </button>
-                          </div>
+                          <button className="btn-purple" style={{width:'100%'}} onClick={handleEvaluate} disabled={evaluating}>
+                            {evaluating?'Evaluating...':evaluated?'↻ Re-evaluate':'🗺 Evaluate Against Roadmap'}
+                          </button>
                         )}
                       </>
                     )}
@@ -449,246 +366,342 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Right column — Results ── */}
+            {/* Right: Document library + actions */}
             <div>
-              {!hasResults ? (
-                <div className="empty" style={{ marginTop: 60 }}>
-                  <div className="empty-icon">🔬</div>
-                  <div className="empty-title">No analysis yet</div>
-                  <div className="empty-sub">Paste feedback on the left and run analysis to see themes, recommendations, and the full agent deliberation.</div>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+                <div>
+                  <div style={{fontSize:16,fontWeight:700,color:'#0f172a'}}>{documents.length} Document{documents.length!==1?'s':''} in Library</div>
+                  <div style={{fontSize:12,color:'#94a3b8',marginTop:2}}>Each document is analyzed individually, then synthesized into a unified theme model</div>
                 </div>
-              ) : (
-                <div className="fade-in">
-                  {evaluated && (
-                    <div className="eval-banner">
-                      <div>
-                        <div className="eval-banner-text">✓ Roadmap evaluation complete</div>
-                        <div className="eval-banner-sub">{roadmapConflicts.length} conflicts · {strategicGaps.length} gaps identified</div>
+                <div style={{display:'flex',gap:8}}>
+                  <button className="btn-primary" onClick={handleSynthesize} disabled={synthesizing||documents.length===0}>
+                    {synthesizing ? <><span className="spin">⏳</span> Synthesizing...</> : '🔬 Synthesize Themes'}
+                  </button>
+                </div>
+              </div>
+              {synthError && <div style={{color:'#dc2626',fontSize:13,padding:'10px 14px',background:'#fef2f2',borderRadius:8,marginBottom:12}}>{synthError}</div>}
+
+              {docsLoading && <div style={{textAlign:'center',padding:40,color:'#94a3b8'}}>Loading documents...</div>}
+
+              {!docsLoading && documents.length===0 && (
+                <div className="empty">
+                  <div className="empty-icon">📂</div>
+                  <div className="empty-title">No documents yet</div>
+                  <div className="empty-sub">Upload Word docs, PDFs, or text files containing user feedback, interview notes, or survey responses.</div>
+                </div>
+              )}
+
+              {documents.map(doc => (
+                <div key={doc.id} className="file-item card-hover">
+                  <div className="file-icon">{fileIcon(doc.name)}</div>
+                  <div className="file-info">
+                    <div className="file-name">{doc.name}</div>
+                    <div className="file-meta">
+                      {new Date(doc.created_at).toLocaleDateString()} · {doc.themes?.length||0} themes extracted
+                      {doc.key_source && ` · ${doc.key_source}`}
+                    </div>
+                    {doc.document_summary && <div className="file-summary">{doc.document_summary}</div>}
+                    {expandedDocs[doc.id] && doc.themes?.length > 0 && (
+                      <div style={{marginTop:8}}>
+                        {doc.themes.map(t => (
+                          <div key={t.id} style={{padding:'5px 8px',background:'#f8f9fb',borderRadius:5,border:'1px solid #e2e6ed',marginBottom:4,fontSize:12}}>
+                            <div style={{fontWeight:600,color:'#1a1f2e'}}>{t.title}</div>
+                            <div style={{color:'#64748b',marginTop:2}}>{t.description}</div>
+                          </div>
+                        ))}
                       </div>
-                      <button className="btn-purple" style={{ fontSize: 12, padding: '7px 14px' }} onClick={() => setActiveTab('roadmap')}>
-                        View Evaluation →
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="tab-bar">
-                    {tabs.map(t => (
-                      <button key={t.key} className={`tab-btn${activeTab === t.key ? ' active' : ''}`} onClick={() => setActiveTab(t.key)}>{t.label}</button>
-                    ))}
+                    )}
                   </div>
+                  <div style={{display:'flex',flexDirection:'column',gap:4,flexShrink:0}}>
+                    <button className="btn-icon" title="Toggle themes" onClick={() => setExpandedDocs(p=>({...p,[doc.id]:!p[doc.id]}))}>
+                      {expandedDocs[doc.id]?'▲':'▼'}
+                    </button>
+                    <button className="btn-icon" title="Delete" onClick={() => handleDeleteDoc(doc.id)}>🗑</button>
+                  </div>
+                </div>
+              ))}
 
-                  {/* ── Themes ── */}
-                  {activeTab === 'themes' && (
-                    <div>
-                      {themes.map(t => {
-                        const sent = sentimentBadge[t.sentiment] || { cls: 'badge-gray', label: t.sentiment };
-                        return (
-                          <div key={t.id} className={`card${t.strength >= 7 ? ' rising' : ''}${t.isNew ? ' new-theme' : ''}`}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 6 }}>
-                              <div style={{ fontWeight: 600, fontSize: 14, color: '#0f172a', flex: 1 }}>{t.title}</div>
-                              <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
-                                {t.isNew && <span className="badge badge-blue">New</span>}
-                                {t.strength >= 7 && <span className="badge badge-orange pulse">↑ Rising</span>}
-                                <span className={`badge ${sent.cls}`}>{sent.label}</span>
-                              </div>
-                            </div>
-                            <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.6, marginBottom: 8 }}>{t.description}</div>
-                            {(t.quotes || []).map((q, i) => (
-                              <div key={i} className="quote">"{q}"</div>
-                            ))}
-                            {t.ambiguities?.length > 0 && (
-                              <div style={{ marginTop: 8, fontSize: 12, color: '#9ca3af' }}>
-                                ⚠ Still unclear: {t.ambiguities.join(' · ')}
-                              </div>
-                            )}
-                            <div style={{ marginTop: 10 }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                                <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>SIGNAL STRENGTH</span>
-                                <span style={{ fontSize: 11, fontWeight: 700, color: t.strength >= 7 ? '#d97706' : '#2563eb' }}>{t.strength}/10</span>
-                              </div>
-                              <div className="signal-bar">
-                                <div className="signal-fill" style={{ width: `${t.strength * 10}%`, background: t.strength >= 7 ? '#f59e0b' : '#2563eb' }} />
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      {researchGaps.length > 0 && (
-                        <div className="card" style={{ background: '#fffbeb', borderColor: '#fde68a' }}>
-                          <div style={{ fontWeight: 600, color: '#92400e', marginBottom: 8, fontSize: 13 }}>⚠ Research Gaps</div>
-                          {researchGaps.map((g, i) => (
-                            <div key={i} style={{ fontSize: 13, color: '#78350f', marginBottom: 4 }}>· {g}</div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
+              {hasResults && !analyzing && (
+                <div style={{marginTop:20,padding:'16px 20px',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                  <div>
+                    <div style={{fontWeight:600,color:'#1d4ed8',fontSize:14}}>✓ Themes synthesized — ready for full analysis</div>
+                    <div style={{fontSize:12,color:'#3b82f6',marginTop:2}}>{masterThemes.length} themes across {documents.length} documents</div>
+                  </div>
+                  <button className="btn-primary" onClick={handleRunAnalysis} disabled={analyzing}>
+                    Run Full Analysis →
+                  </button>
+                </div>
+              )}
 
-                  {/* ── Questions ── */}
-                  {activeTab === 'questions' && (
-                    <div>
-                      <p style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>Ask these in your next research session to fill the gaps in your understanding.</p>
-                      {probingQuestions.map((q, i) => (
-                        <div key={i} className="card" style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
-                          <span style={{ fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: 22, color: '#e2e6ed', flexShrink: 0, lineHeight: 1 }}>{String(i + 1).padStart(2, '0')}</span>
-                          <span style={{ fontSize: 13, color: '#1a1f2e', lineHeight: 1.6, paddingTop: 2 }}>{q}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* ── Recommendations ── */}
-                  {activeTab === 'recommendations' && (
-                    <div>
-                      {recommendations.map(r => {
-                        const ps = placementBadge[r.roadmapPlacement] || placementBadge.later;
-                        const eng = engineerEstimates.find(e => e.recommendationId === r.id);
-                        const challenges = directorChallenges.filter(c => c.recommendationId === r.id);
-                        const rebuttal = rebuttals.find(rb => rb.recommendationId === r.id);
-                        return (
-                          <div key={r.id} className="card">
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
-                              <div style={{ fontWeight: 600, fontSize: 14, color: '#0f172a', flex: 1 }}>{r.title}</div>
-                              <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
-                                <span className={`badge ${ps.cls}`}>{ps.label}</span>
-                                {eng && <span className={`badge ${effortBadge[eng.effort]?.cls}`}>{eng.effort}</span>}
-                              </div>
-                            </div>
-                            <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.6, marginBottom: 12 }}>{r.rationale}</div>
-                            <div className="score-grid">
-                              {[['User Value', r.userValue, '#2563eb'], ['Strategic Fit', r.strategicFit, '#7c3aed'], ['Confidence', r.confidenceScore, '#0891b2']].map(([l, v, c]) => (
-                                <div key={l} className="score-item">
-                                  <div className="score-label">{l}</div>
-                                  <ScoreBar value={v} color={c} />
-                                </div>
-                              ))}
-                            </div>
-                            {eng && (
-                              <div style={{ marginTop: 12, padding: '10px 12px', background: '#f8f9fb', borderRadius: 6, fontSize: 12 }}>
-                                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: eng.incrementalPath ? 6 : 0 }}>
-                                  <span><strong>Effort:</strong> {eng.effortWeeks}</span>
-                                  <span><strong>Complexity:</strong> {eng.complexity}</span>
-                                </div>
-                                {eng.incrementalPath && <div style={{ color: '#374151' }}>→ {eng.incrementalPath}</div>}
-                                {eng.redFlags?.map((f, i) => <div key={i} style={{ color: '#dc2626', marginTop: 4 }}>⚑ {f}</div>)}
-                              </div>
-                            )}
-                            {challenges.length > 0 && (
-                              <div style={{ marginTop: 10 }}>
-                                {challenges.map((c, i) => (
-                                  <div key={i} style={{ padding: '8px 12px', background: '#fff7ed', borderRadius: 6, marginBottom: 4, fontSize: 12 }}>
-                                    <div style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
-                                      <span className={`badge ${severityBadge[c.severity]?.cls}`}>{severityBadge[c.severity]?.label}</span>
-                                      <span className="badge badge-gray">{c.type}</span>
-                                    </div>
-                                    <div style={{ color: '#92400e' }}>{c.challenge}</div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            {rebuttal && (
-                              <div style={{ marginTop: 8, padding: '8px 12px', background: '#f0fdf4', borderRadius: 6, fontSize: 12 }}>
-                                <span className={`badge ${stanceBadge[rebuttal.stance]?.cls}`} style={{ marginBottom: 6, display: 'inline-block' }}>{stanceBadge[rebuttal.stance]?.label}</span>
-                                <div style={{ color: '#166534', marginTop: 4 }}>{rebuttal.response}</div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* ── Deliberation ── */}
-                  {activeTab === 'deliberation' && (
-                    <div>
-                      {finalSummary && (
-                        <div className="card" style={{ background: '#f0fdf4', borderColor: '#86efac', marginBottom: 16 }}>
-                          <div style={{ fontWeight: 700, color: '#15803d', marginBottom: 8, fontSize: 13 }}>PM Final Statement</div>
-                          <div style={{ fontSize: 13, color: '#166534', lineHeight: 1.7 }}>{finalSummary}</div>
-                        </div>
-                      )}
-                      <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 12 }}>Director Challenges</div>
-                      {directorChallenges.map((c, i) => {
-                        const rb = rebuttals.find(r => r.challengeIndex === i);
-                        return (
-                          <div key={i} className="card">
-                            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                              <span className={`badge ${severityBadge[c.severity]?.cls}`}>{severityBadge[c.severity]?.label}</span>
-                              <span className="badge badge-gray">{c.type}</span>
-                              <span className="badge badge-gray">{c.directorStance}</span>
-                            </div>
-                            <div style={{ fontSize: 13, color: '#1a1f2e', lineHeight: 1.6, marginBottom: 8 }}>{c.challenge}</div>
-                            {rb && (
-                              <div style={{ borderTop: '1px solid #e2e6ed', paddingTop: 8, marginTop: 4 }}>
-                                <span className={`badge ${stanceBadge[rb.stance]?.cls}`} style={{ marginBottom: 6, display: 'inline-block' }}>{stanceBadge[rb.stance]?.label}</span>
-                                <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.6 }}>{rb.response}</div>
-                                {rb.revisedRecommendation && (
-                                  <div style={{ marginTop: 6, fontSize: 12, color: '#d97706', fontStyle: 'italic' }}>→ Revised: {rb.revisedRecommendation}</div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* ── Roadmap evaluation ── */}
-                  {activeTab === 'roadmap' && evaluated && (
-                    <div>
-                      {strategicGaps.length > 0 && (
-                        <>
-                          <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 12 }}>Strategic Gaps — Not on your roadmap</div>
-                          {strategicGaps.map((g, i) => (
-                            <div key={i} className="card" style={{ borderLeft: '3px solid #7c3aed' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                                <div style={{ fontWeight: 600, color: '#0f172a' }}>◈ {g.title}</div>
-                                <span className={`badge ${g.urgency === 'high' ? 'badge-red' : g.urgency === 'medium' ? 'badge-yellow' : 'badge-gray'}`}>{g.urgency} urgency</span>
-                              </div>
-                              <div style={{ fontSize: 13, color: '#374151' }}>{g.evidence}</div>
-                            </div>
-                          ))}
-                          <div className="divider" />
-                        </>
-                      )}
-                      {roadmapConflicts.length > 0 && (
-                        <>
-                          <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 12 }}>Roadmap Conflicts</div>
-                          {roadmapConflicts.map((c, i) => {
-                            const item = roadmapItems.find(r => r.id === c.roadmapItemId);
-                            return (
-                              <div key={i} className="card" style={{ borderLeft: '3px solid #ef4444' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                                  <div style={{ fontWeight: 600, color: '#0f172a' }}>{item?.item || `Item ${c.roadmapItemId}`}</div>
-                                  <span className="badge badge-red">{c.recommendation}</span>
-                                </div>
-                                <div style={{ fontSize: 13, color: '#374151' }}>{c.issue}</div>
-                              </div>
-                            );
-                          })}
-                          <div className="divider" />
-                        </>
-                      )}
-                      <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 12 }}>Item-by-Item Coverage</div>
-                      {roadmapItems.map(r => {
-                        const ev = roadmapAnalysis.find(a => a.roadmapItemId === r.id);
-                        const cb = ev ? coverageBadge[ev.coverage] : null;
-                        return (
-                          <div key={r.id} className="card" style={{ padding: '10px 14px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: ev?.rationale ? 4 : 0 }}>
-                              <span style={{ fontSize: 13, color: '#1a1f2e', fontWeight: 500 }}>{r.item}</span>
-                              {cb && <span className={`badge ${cb.cls}`}>{cb.label}</span>}
-                            </div>
-                            {ev?.rationale && <div style={{ fontSize: 12, color: '#64748b' }}>{ev.rationale}</div>}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+              {analyzing && (
+                <div className="panel fade-in" style={{marginTop:20}}>
+                  <div className="panel-title">Agent Pipeline</div>
+                  <div className="steps">
+                    <Step label="PM — recommending solutions & roadmap placement" status={agentStatus.pm} />
+                    <Step label="Engineer — estimating effort & flagging risks" status={agentStatus.engineer} />
+                    <Step label="Director — challenging every assumption" status={agentStatus.director} />
+                    <Step label="PM — defending, revising, or conceding" status={agentStatus.rebuttal} />
+                  </div>
+                  {analysisError && <div style={{color:'#dc2626',fontSize:12,marginTop:8}}>{analysisError}</div>}
                 </div>
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Results view ── */}
+      {view==='results' && (
+        <div className="page fade-in">
+          {evaluated && (
+            <div className="eval-banner">
+              <div>
+                <div style={{fontWeight:600,color:'#5b21b6',fontSize:14}}>✓ Roadmap evaluation complete</div>
+                <div style={{fontSize:12,color:'#7c3aed',marginTop:2}}>{roadmapConflicts.length} conflicts · {strategicGaps.length} gaps identified</div>
+              </div>
+              <button className="btn-purple" onClick={() => setActiveTab('roadmap')}>View Evaluation →</button>
+            </div>
+          )}
+
+          {!hasAnalysis && (
+            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:16}}>
+              <button className="btn-primary" onClick={handleRunAnalysis} disabled={analyzing}>
+                {analyzing?<><span className="spin">⏳</span> Analyzing...</>:'Run Full Analysis →'}
+              </button>
+            </div>
+          )}
+
+          <div className="tab-bar">
+            {tabs.map(t => <button key={t.key} className={`tab-btn${activeTab===t.key?' active':''}`} onClick={() => setActiveTab(t.key)}>{t.label}</button>)}
+          </div>
+
+          {/* Themes */}
+          {activeTab==='themes' && (
+            <div>
+              {crossCuttingInsights.length > 0 && (
+                <div style={{marginBottom:20}}>
+                  <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:'.08em',textTransform:'uppercase',marginBottom:8}}>Cross-Cutting Insights</div>
+                  {crossCuttingInsights.map((ins,i) => <div key={i} className="insight-card">💡 {ins}</div>)}
+                </div>
+              )}
+              {masterThemes.map(t => (
+                <div key={t.id} className={`card card-hover${t.strength>=7?' rising':''}${t.isNew?' new-theme':''}`}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:6}}>
+                    <div style={{fontWeight:700,fontSize:14,color:'#0f172a',flex:1}}>{t.title}</div>
+                    <div style={{display:'flex',gap:5,flexShrink:0,flexWrap:'wrap',justifyContent:'flex-end'}}>
+                      {t.strength>=7 && <Badge cls="badge-orange"><span className="pulse">↑</span> Rising</Badge>}
+                      <Badge cls={sentimentMap[t.sentiment]||'badge-gray'}>{t.sentiment}</Badge>
+                      {t.frequency && <Badge cls="badge-gray">{t.frequency} sources</Badge>}
+                    </div>
+                  </div>
+                  <div style={{fontSize:13,color:'#374151',lineHeight:1.6,marginBottom:8}}>{t.description}</div>
+                  {t.sourceDocuments?.length > 0 && (
+                    <div style={{fontSize:11,color:'#9ca3af',marginBottom:6}}>From: {t.sourceDocuments.join(' · ')}</div>
+                  )}
+                  {(t.quotes||[]).map((q,i) => <div key={i} className="quote">"{q}"</div>)}
+                  {t.ambiguities?.length>0 && (
+                    <div style={{fontSize:12,color:'#f59e0b',marginTop:6}}>⚠ Still unclear: {t.ambiguities.join(' · ')}</div>
+                  )}
+                  <div style={{marginTop:10}}>
+                    <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+                      <span style={{fontSize:11,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em'}}>Signal Strength</span>
+                      <span style={{fontSize:12,fontWeight:700,color:t.strength>=7?'#d97706':'#2563eb'}}>{t.strength}/10</span>
+                    </div>
+                    <div className="signal-bar">
+                      <div className="signal-fill" style={{width:`${t.strength*10}%`,background:t.strength>=7?'#f59e0b':'#2563eb'}} />
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {researchGaps.length>0 && (
+                <div className="card" style={{background:'#fffbeb',borderColor:'#fde68a',marginTop:4}}>
+                  <div style={{fontWeight:700,color:'#92400e',marginBottom:8,fontSize:13}}>⚠ Research Gaps</div>
+                  {researchGaps.map((g,i) => <div key={i} style={{fontSize:13,color:'#78350f',marginBottom:3}}>· {g}</div>)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Questions */}
+          {activeTab==='questions' && (
+            <div>
+              <p style={{fontSize:13,color:'#64748b',marginBottom:16}}>Ask these in your next research session to close gaps in understanding.</p>
+              {probingQuestions.map((q,i) => (
+                <div key={i} className="card card-hover" style={{display:'flex',gap:14,alignItems:'flex-start'}}>
+                  <span style={{fontFamily:'Syne,sans-serif',fontWeight:800,fontSize:22,color:'#e2e6ed',flexShrink:0,lineHeight:1}}>{String(i+1).padStart(2,'0')}</span>
+                  <span style={{fontSize:13,color:'#1a1f2e',lineHeight:1.6,paddingTop:3}}>{q}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Recommendations */}
+          {activeTab==='recommendations' && (
+            <div>
+              {recommendations.map(r => {
+                const eng = engineerEstimates.find(e=>e.recommendationId===r.id);
+                const challenges = directorChallenges.filter(c=>c.recommendationId===r.id);
+                const rebuttal = rebuttals.find(rb=>rb.recommendationId===r.id);
+                return (
+                  <div key={r.id} className="card card-hover">
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:8}}>
+                      <div style={{fontWeight:700,fontSize:14,color:'#0f172a',flex:1}}>{r.title}</div>
+                      <div style={{display:'flex',gap:5,flexShrink:0}}>
+                        <Badge cls={placementMap[r.roadmapPlacement]||'badge-gray'}>{placementLabel[r.roadmapPlacement]||r.roadmapPlacement}</Badge>
+                        {eng && <Badge cls={effortMap[eng.effort]||'badge-gray'}>{eng.effort}</Badge>}
+                      </div>
+                    </div>
+                    <div style={{fontSize:13,color:'#374151',lineHeight:1.6,marginBottom:12}}>{r.rationale}</div>
+                    <ScoreRow label="User Value" value={r.userValue} color="#2563eb" />
+                    <ScoreRow label="Strategic Fit" value={r.strategicFit} color="#7c3aed" />
+                    <ScoreRow label="Confidence" value={r.confidenceScore} color="#0891b2" />
+                    {eng && (
+                      <div style={{marginTop:12,padding:'10px 12px',background:'#f8f9fb',borderRadius:6,fontSize:12}}>
+                        <div style={{display:'flex',gap:16,marginBottom:eng.incrementalPath?6:0,flexWrap:'wrap'}}>
+                          <span><strong>Effort:</strong> {eng.effortWeeks}</span>
+                          <span><strong>Complexity:</strong> {eng.complexity}</span>
+                        </div>
+                        {eng.incrementalPath && <div style={{color:'#374151',marginBottom:4}}>→ {eng.incrementalPath}</div>}
+                        {eng.redFlags?.map((f,i) => <div key={i} style={{color:'#dc2626',marginTop:3}}>⚑ {f}</div>)}
+                      </div>
+                    )}
+                    {challenges.length>0 && (
+                      <div style={{marginTop:10}}>
+                        {challenges.map((c,i) => (
+                          <div key={i} style={{padding:'8px 12px',background:'#fff7ed',borderRadius:6,marginBottom:4,fontSize:12}}>
+                            <div style={{display:'flex',gap:6,marginBottom:4}}>
+                              <Badge cls={severityMap[c.severity]}>{c.severity}</Badge>
+                              <Badge cls="badge-gray">{c.type}</Badge>
+                            </div>
+                            <div style={{color:'#92400e'}}>{c.challenge}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {rebuttal && (
+                      <div style={{marginTop:8,padding:'8px 12px',background:'#f0fdf4',borderRadius:6,fontSize:12}}>
+                        <Badge cls={stanceMap[rebuttal.stance]}>{stanceLabel[rebuttal.stance]}</Badge>
+                        <div style={{color:'#166534',marginTop:6,lineHeight:1.6}}>{rebuttal.response}</div>
+                        {rebuttal.revisedRecommendation && <div style={{color:'#d97706',marginTop:4,fontStyle:'italic'}}>→ Revised: {rebuttal.revisedRecommendation}</div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Deliberation */}
+          {activeTab==='deliberation' && (
+            <div>
+              {finalSummary && (
+                <div className="card" style={{background:'#f0fdf4',borderColor:'#86efac',marginBottom:16}}>
+                  <div style={{fontWeight:700,color:'#15803d',marginBottom:8,fontSize:13}}>PM Final Statement</div>
+                  <div style={{fontSize:13,color:'#166534',lineHeight:1.7}}>{finalSummary}</div>
+                </div>
+              )}
+              <div style={{fontWeight:600,fontSize:13,color:'#374151',marginBottom:12}}>Director Challenges & PM Responses</div>
+              {directorChallenges.map((c,i) => {
+                const rb = rebuttals.find(r=>r.challengeIndex===i);
+                return (
+                  <div key={i} className="card">
+                    <div style={{display:'flex',gap:6,marginBottom:8,flexWrap:'wrap'}}>
+                      <Badge cls={severityMap[c.severity]}>{c.severity}</Badge>
+                      <Badge cls="badge-gray">{c.type}</Badge>
+                      <Badge cls="badge-gray">{c.directorStance}</Badge>
+                    </div>
+                    <div style={{fontSize:13,color:'#1a1f2e',lineHeight:1.6,marginBottom:8}}>{c.challenge}</div>
+                    {rb && (
+                      <div style={{borderTop:'1px solid #e2e6ed',paddingTop:8}}>
+                        <Badge cls={stanceMap[rb.stance]}>{stanceLabel[rb.stance]}</Badge>
+                        <div style={{fontSize:13,color:'#374151',lineHeight:1.6,marginTop:6}}>{rb.response}</div>
+                        {rb.revisedRecommendation && <div style={{fontSize:12,color:'#d97706',marginTop:4,fontStyle:'italic'}}>→ {rb.revisedRecommendation}</div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Roadmap eval */}
+          {activeTab==='roadmap' && evaluated && (
+            <div>
+              {strategicGaps.length>0 && (
+                <>
+                  <div style={{fontWeight:700,fontSize:13,color:'#374151',marginBottom:12}}>Strategic Gaps — Not on your roadmap</div>
+                  {strategicGaps.map((g,i) => (
+                    <div key={i} className="card" style={{borderLeft:'3px solid #7c3aed'}}>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:8,marginBottom:4}}>
+                        <div style={{fontWeight:600,color:'#0f172a'}}>◈ {g.title}</div>
+                        <Badge cls={g.urgency==='high'?'badge-red':g.urgency==='medium'?'badge-yellow':'badge-gray'}>{g.urgency} urgency</Badge>
+                      </div>
+                      <div style={{fontSize:13,color:'#374151'}}>{g.evidence}</div>
+                    </div>
+                  ))}
+                  <div className="divider" />
+                </>
+              )}
+              {roadmapConflicts.length>0 && (
+                <>
+                  <div style={{fontWeight:700,fontSize:13,color:'#374151',marginBottom:12}}>Roadmap Conflicts</div>
+                  {roadmapConflicts.map((c,i) => {
+                    const item = roadmapItems.find(r=>r.id===c.roadmapItemId);
+                    return (
+                      <div key={i} className="card" style={{borderLeft:'3px solid #ef4444'}}>
+                        <div style={{display:'flex',justifyContent:'space-between',gap:8,marginBottom:4}}>
+                          <div style={{fontWeight:600,color:'#0f172a'}}>{item?.item||`Item ${c.roadmapItemId}`}</div>
+                          <Badge cls="badge-red">{c.recommendation}</Badge>
+                        </div>
+                        <div style={{fontSize:13,color:'#374151'}}>{c.issue}</div>
+                      </div>
+                    );
+                  })}
+                  <div className="divider" />
+                </>
+              )}
+              <div style={{fontWeight:700,fontSize:13,color:'#374151',marginBottom:12}}>Item Coverage</div>
+              {roadmapItems.map(r => {
+                const ev = roadmapAnalysis.find(a=>a.roadmapItemId===r.id);
+                return (
+                  <div key={r.id} className="card" style={{padding:'10px 14px',display:'flex',justifyContent:'space-between',gap:8,alignItems:'flex-start'}}>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:600,color:'#1a1f2e'}}>{r.item}</div>
+                      {ev?.rationale && <div style={{fontSize:12,color:'#64748b',marginTop:3}}>{ev.rationale}</div>}
+                    </div>
+                    {ev && <Badge cls={coverageMap[ev.coverage]}>{coverageLabel[ev.coverage]}</Badge>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Sessions view ── */}
+      {view==='sessions' && (
+        <div className="page fade-in" style={{maxWidth:800}}>
+          <div style={{fontWeight:700,fontSize:20,color:'#0f172a',marginBottom:6}}>Saved Sessions</div>
+          <div style={{fontSize:13,color:'#64748b',marginBottom:24}}>Load a previous analysis session to continue your work.</div>
+          {sessions.length===0 && (
+            <div className="empty">
+              <div className="empty-icon">💾</div>
+              <div className="empty-title">No saved sessions yet</div>
+              <div className="empty-sub">Run an analysis and hit Save Session to store your work here.</div>
+            </div>
+          )}
+          {sessions.map(s => (
+            <div key={s.id} className="card card-hover" style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12}}>
+              <div>
+                <div style={{fontWeight:600,color:'#1a1f2e',marginBottom:4}}>{new Date(s.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
+                <div style={{fontSize:12,color:'#64748b'}}>{s.masterThemes?.length||0} themes · {s.recommendations?.length||0} recommendations</div>
+              </div>
+              <div style={{display:'flex',gap:8}}>
+                <button className="btn-primary btn-sm" onClick={() => handleLoadSession(s)}>Load</button>
+                <button className="btn-danger" onClick={() => deleteSession(s.id).then(() => setSessions(ss=>ss.filter(x=>x.id!==s.id)))}>Delete</button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
