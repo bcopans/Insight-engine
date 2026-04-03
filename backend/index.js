@@ -62,16 +62,7 @@ async function extractText(file) {
   return msg.content.map(b => b.text || '').join('');
 }
 
-// SSE setup
-function sse(res) {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  return (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
-// Slim helpers — only pass what each agent actually needs
+// Slim helpers — only pass what each agent needs
 const slim = {
   theme: t => ({ id: t.id, title: t.title, description: t.description, strength: t.strength, sentiment: t.sentiment }),
   rec: r => ({ id: r.id, title: r.title, rationale: r.rationale, roadmapPlacement: r.roadmapPlacement, userValue: r.userValue, strategicFit: r.strategicFit, confidenceScore: r.confidenceScore }),
@@ -129,24 +120,20 @@ app.delete('/api/documents/:id', async (req, res) => {
   }
 });
 
-// ── Synthesize — SSE ──────────────────────────────────────────────────────────
+// ── Synthesize ────────────────────────────────────────────────────────────────
 
 app.post('/api/synthesize', async (req, res) => {
-  const send = sse(res);
   try {
-    send('status', { message: 'Loading documents...' });
-
     const { data: docs, error } = await supabase
       .from('documents')
       .select('name, themes, document_summary, key_source')
       .order('created_at', { ascending: true });
 
-    if (error) { send('error', { message: 'Database error: ' + error.message }); return res.end(); }
-    if (!docs?.length) { send('error', { message: 'No documents found. Please upload documents first.' }); return res.end(); }
+    if (error) return res.status(500).json({ error: 'Database error: ' + error.message });
+    if (!docs?.length) return res.status(400).json({ error: 'No documents found. Please upload documents first.' });
 
-    send('status', { message: `Master Researcher synthesizing ${docs.length} document${docs.length > 1 ? 's' : ''}...` });
+    console.log(`Synthesizing ${docs.length} documents...`);
 
-    // Only send titles, summaries, and slim themes to reduce token usage
     const input = docs.map(d => ({
       document: d.name,
       source: d.key_source || '',
@@ -166,83 +153,47 @@ app.post('/api/synthesize', async (req, res) => {
       3500
     );
 
-    send('complete', out);
-    res.end();
+    console.log('Synthesis complete:', out.themes?.length, 'themes');
+    res.json(out);
   } catch (e) {
     console.error('Synthesize error:', e.message);
-    send('error', { message: 'Synthesis failed: ' + e.message });
-    res.end();
+    res.status(500).json({ error: 'Synthesis failed: ' + e.message });
   }
 });
 
-// ── Full analysis pipeline — SSE ──────────────────────────────────────────────
+// ── Full analysis pipeline ────────────────────────────────────────────────────
 
 app.post('/api/analyze', async (req, res) => {
-  const send = sse(res);
   const { themes } = req.body;
-  if (!themes?.length) { send('error', { message: 'No themes provided' }); return res.end(); }
+  if (!themes?.length) return res.status(400).json({ error: 'No themes provided' });
 
   const slimThemes = themes.map(slim.theme);
 
   try {
-    // PM
-    send('agent', { agent: 'pm', status: 'running', message: 'Reviewing themes and forming recommendations...' });
-    let pmOut;
-    try {
-      pmOut = await callClaude(PM, `Research themes:\n${JSON.stringify(slimThemes)}`, 3000);
-      send('agent', { agent: 'pm', status: 'done', output: pmOut });
-    } catch (e) {
-      send('agent', { agent: 'pm', status: 'error', message: e.message });
-      send('error', { message: 'PM agent failed: ' + e.message });
-      return res.end();
-    }
+    console.log('PM agent running...');
+    const pmOut = await callClaude(PM, `Research themes:\n${JSON.stringify(slimThemes)}`, 3000);
 
-    // Engineer
-    send('agent', { agent: 'engineer', status: 'running', message: 'Estimating effort and flagging risks...' });
-    let engineerOut;
-    try {
-      const slimRecs = (pmOut.recommendations || []).map(slim.rec);
-      engineerOut = await callClaude(ENGINEER, `PM Recommendations:\n${JSON.stringify(slimRecs)}`, 2000);
-      send('agent', { agent: 'engineer', status: 'done', output: engineerOut });
-    } catch (e) {
-      send('agent', { agent: 'engineer', status: 'error', message: e.message });
-      engineerOut = { estimates: [], globalFlags: [] };
-    }
+    console.log('Engineer agent running...');
+    const slimRecs = (pmOut.recommendations || []).map(slim.rec);
+    const engineerOut = await callClaude(ENGINEER, `PM Recommendations:\n${JSON.stringify(slimRecs)}`, 2000).catch(() => ({ estimates: [], globalFlags: [] }));
 
-    // Director
-    send('agent', { agent: 'director', status: 'running', message: 'Challenging assumptions and stress-testing...' });
-    let directorOut;
-    try {
-      const slimRecs = (pmOut.recommendations || []).map(slim.rec);
-      const slimEsts = (engineerOut.estimates || []).map(slim.estimate);
-      directorOut = await callClaude(
-        DIRECTOR,
-        `PM Recommendations:\n${JSON.stringify(slimRecs)}\n\nEngineer Estimates:\n${JSON.stringify(slimEsts)}`,
-        2000
-      );
-      send('agent', { agent: 'director', status: 'done', output: directorOut });
-    } catch (e) {
-      send('agent', { agent: 'director', status: 'error', message: e.message });
-      directorOut = { challenges: [], overallAssessment: '', topPriority: '', biggestConcern: '' };
-    }
+    console.log('Director agent running...');
+    const slimEsts = (engineerOut.estimates || []).map(slim.estimate);
+    const directorOut = await callClaude(
+      DIRECTOR,
+      `PM Recommendations:\n${JSON.stringify(slimRecs)}\n\nEngineer Estimates:\n${JSON.stringify(slimEsts)}`,
+      2000
+    ).catch(() => ({ challenges: [], overallAssessment: '', topPriority: '', biggestConcern: '' }));
 
-    // PM Rebuttal
-    send('agent', { agent: 'rebuttal', status: 'running', message: 'Defending, revising, or conceding each challenge...' });
-    let rebuttalOut;
-    try {
-      const slimRecs = (pmOut.recommendations || []).map(slim.rec);
-      rebuttalOut = await callClaude(
-        PM_REBUTTAL,
-        `Recommendations:\n${JSON.stringify(slimRecs)}\n\nThemes (evidence):\n${JSON.stringify(slimThemes)}\n\nChallenges:\n${JSON.stringify(directorOut.challenges || [])}`,
-        2000
-      );
-      send('agent', { agent: 'rebuttal', status: 'done', output: rebuttalOut });
-    } catch (e) {
-      send('agent', { agent: 'rebuttal', status: 'error', message: e.message });
-      rebuttalOut = { rebuttals: [], finalSummary: '' };
-    }
+    console.log('PM Rebuttal running...');
+    const rebuttalOut = await callClaude(
+      PM_REBUTTAL,
+      `Recommendations:\n${JSON.stringify(slimRecs)}\n\nThemes:\n${JSON.stringify(slimThemes)}\n\nChallenges:\n${JSON.stringify(directorOut.challenges || [])}`,
+      2000
+    ).catch(() => ({ rebuttals: [], finalSummary: '' }));
 
-    send('complete', {
+    console.log('Analysis complete.');
+    res.json({
       recommendations: pmOut.recommendations || [],
       engineerEstimates: engineerOut.estimates || [],
       globalFlags: engineerOut.globalFlags || [],
@@ -253,11 +204,9 @@ app.post('/api/analyze', async (req, res) => {
       rebuttals: rebuttalOut.rebuttals || [],
       finalSummary: rebuttalOut.finalSummary || '',
     });
-    res.end();
   } catch (e) {
     console.error('Analysis error:', e.message);
-    send('error', { message: 'Analysis failed: ' + e.message });
-    res.end();
+    res.status(500).json({ error: 'Analysis failed: ' + e.message });
   }
 });
 

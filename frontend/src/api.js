@@ -20,55 +20,42 @@ export async function deleteDocument(id) {
   return res.json();
 }
 
-// SSE-based streaming synthesize
-export function streamSynthesize(handlers) {
+export async function streamSynthesize(handlers) {
   const { onStatus, onComplete, onError } = handlers;
-  fetch(`${BASE}/api/synthesize`, { method: 'POST' })
-    .then(res => readSSE(res, { onStatus, onComplete, onError }))
-    .catch(e => onError(e.message));
-}
-
-// SSE-based streaming analyze
-export function streamAnalyze(themes, handlers) {
-  const { onAgent, onComplete, onError } = handlers;
-  fetch(`${BASE}/api/analyze`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ themes }),
-  })
-    .then(res => readSSE(res, { onAgent, onComplete, onError }))
-    .catch(e => onError(e.message));
-}
-
-// Generic SSE reader
-function readSSE(res, handlers) {
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  const pump = () => reader.read().then(({ done, value }) => {
-    if (done) return;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    let event = null;
-    for (const line of lines) {
-      if (line.startsWith('event: ')) { event = line.slice(7).trim(); continue; }
-      if (line.startsWith('data: ') && event) {
-        try {
-          const data = JSON.parse(line.slice(6));
-          if (event === 'status' && handlers.onStatus) handlers.onStatus(data);
-          if (event === 'agent' && handlers.onAgent) handlers.onAgent(data);
-          if (event === 'complete' && handlers.onComplete) handlers.onComplete(data);
-          if (event === 'error' && handlers.onError) handlers.onError(data.message);
-        } catch {}
-        event = null;
-      }
+  try {
+    onStatus({ message: 'Master Researcher synthesizing themes across all documents...' });
+    const res = await fetch(`${BASE}/api/synthesize`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Synthesis failed');
     }
-    pump();
-  }).catch(e => handlers.onError && handlers.onError(e.message));
+    const data = await res.json();
+    onComplete(data);
+  } catch (e) {
+    onError(e.message);
+  }
+}
 
-  pump();
+export async function streamAnalyze(themes, handlers) {
+  const { onAgent, onComplete, onError } = handlers;
+  try {
+    onAgent({ agent: 'pm', status: 'running', message: 'PM forming recommendations...' });
+    const res = await fetch(`${BASE}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ themes }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Analysis failed');
+    }
+    onAgent({ agent: 'engineer', status: 'running', message: 'Engineer estimating effort...' });
+    const data = await res.json();
+    onAgent({ agent: 'rebuttal', status: 'done' });
+    onComplete(data);
+  } catch (e) {
+    onError(e.message);
+  }
 }
 
 export async function parseRoadmap(file, text) {
