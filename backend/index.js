@@ -6,8 +6,9 @@ const mammoth = require('mammoth');
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const {
-  RESEARCHER_SINGLE, MASTER_RESEARCHER, PM, ENGINEER,
-  DIRECTOR, PM_REBUTTAL, ROADMAP_EVALUATOR, ROADMAP_PARSER
+  ROADMAP_PARSER, RESEARCHER_SINGLE, MASTER_RESEARCHER,
+  PM, ENGINEER, FINANCE_ANALYST, GTM_SPECIALIST,
+  DIRECTOR, PM_REBUTTAL, ROADMAP_EVALUATOR, FINANCE_CONVERSATION
 } = require('./prompts');
 
 const app = express();
@@ -62,11 +63,13 @@ async function extractText(file) {
   return msg.content.map(b => b.text || '').join('');
 }
 
-// Slim helpers — only pass what each agent needs
+// Slim helpers
 const slim = {
-  theme: t => ({ id: t.id, title: t.title, description: t.description, strength: t.strength, sentiment: t.sentiment }),
-  rec: r => ({ id: r.id, title: r.title, rationale: r.rationale, roadmapPlacement: r.roadmapPlacement, userValue: r.userValue, strategicFit: r.strategicFit, confidenceScore: r.confidenceScore }),
-  estimate: e => ({ recommendationId: e.recommendationId, effort: e.effort, effortWeeks: e.effortWeeks, complexity: e.complexity }),
+  theme: t => ({ id: t.id, customerProblem: t.customerProblem, strength: t.strength, problemSize: t.problemSize, amazonPositioned: t.amazonPositioned }),
+  rec: r => ({ id: r.id, title: r.title, rationale: r.rationale, projectType: r.projectType, userValue: r.userValue, strategicFit: r.strategicFit, mlp: r.mlp }),
+  estimate: e => ({ recommendationId: e.recommendationId, effortWeeks: e.effortWeeks, effortSize: e.effortSize, complexity: e.complexity }),
+  financeModel: m => ({ recommendationId: m.recommendationId, projectType: m.projectType, headline: m.headline, roi: m.roi, paybackPeriod: m.paybackPeriod }),
+  gtm: g => ({ recommendationId: g.recommendationId, launchDifficulty: g.launchDifficulty, timeToMarket: g.timeToMarket, competitiveWindow: g.competitiveWindow }),
 };
 
 // ── Upload ────────────────────────────────────────────────────────────────────
@@ -80,7 +83,7 @@ app.post('/api/upload', upload.array('files', 20), async (req, res) => {
       const out = await callClaude(
         RESEARCHER_SINGLE,
         `Document: ${file.originalname}\n\nContent:\n${text.slice(0, 5000)}`,
-        1500
+        2000
       );
       const { data, error } = await supabase.from('documents').insert([{
         name: file.originalname,
@@ -124,11 +127,7 @@ app.delete('/api/documents/:id', async (req, res) => {
 
 app.post('/api/synthesize', async (req, res) => {
   try {
-    const { data: docs, error } = await supabase
-      .from('documents')
-      .select('name, themes, document_summary, key_source')
-      .order('created_at', { ascending: true });
-
+    const { data: docs, error } = await supabase.from('documents').select('name, themes, document_summary, key_source').order('created_at', { ascending: true });
     if (error) return res.status(500).json({ error: 'Database error: ' + error.message });
     if (!docs?.length) return res.status(400).json({ error: 'No documents found. Please upload documents first.' });
 
@@ -139,10 +138,15 @@ app.post('/api/synthesize', async (req, res) => {
       source: d.key_source || '',
       summary: d.document_summary || '',
       themes: (d.themes || []).map(t => ({
-        title: t.title,
+        customerProblem: t.customerProblem,
         description: t.description,
         sentiment: t.sentiment,
         strength: t.strength,
+        amazonPositioned: t.amazonPositioned,
+        amazonPositionedRationale: t.amazonPositionedRationale,
+        certainty: t.certainty,
+        followUpNeeded: t.followUpNeeded,
+        sourceType: t.sourceType,
         quote: (t.quotes || [])[0] || '',
       })),
     }));
@@ -150,7 +154,7 @@ app.post('/api/synthesize', async (req, res) => {
     const out = await callClaude(
       MASTER_RESEARCHER,
       `Synthesize themes from ${docs.length} documents:\n\n${JSON.stringify(input)}`,
-      3500
+      4000
     );
 
     console.log('Synthesis complete:', out.themes?.length, 'themes');
@@ -161,52 +165,132 @@ app.post('/api/synthesize', async (req, res) => {
   }
 });
 
-// ── Full analysis pipeline ────────────────────────────────────────────────────
+// ── Full 6-agent analysis pipeline ───────────────────────────────────────────
 
 app.post('/api/analyze', async (req, res) => {
-  const { themes } = req.body;
+  const { themes, roadmapItems = [] } = req.body;
   if (!themes?.length) return res.status(400).json({ error: 'No themes provided' });
 
   const slimThemes = themes.map(slim.theme);
 
   try {
-    console.log('PM agent running...');
-    const pmOut = await callClaude(PM, `Research themes:\n${JSON.stringify(slimThemes)}`, 3000);
+    // 1. PM
+    console.log('PM agent...');
+    const pmOut = await callClaude(
+      PM,
+      `Research themes:\n${JSON.stringify(slimThemes)}\n\nRoadmap items:\n${JSON.stringify(roadmapItems)}`,
+      3000
+    );
 
-    console.log('Engineer agent running...');
+    // 2. Engineer
+    console.log('Engineer agent...');
     const slimRecs = (pmOut.recommendations || []).map(slim.rec);
-    const engineerOut = await callClaude(ENGINEER, `PM Recommendations:\n${JSON.stringify(slimRecs)}`, 2000).catch(() => ({ estimates: [], globalFlags: [] }));
+    const engineerOut = await callClaude(ENGINEER, `PM Recommendations:\n${JSON.stringify(slimRecs)}`, 2000)
+      .catch(() => ({ estimates: [], globalFlags: [] }));
 
-    console.log('Director agent running...');
+    // 3. Finance Analyst
+    console.log('Finance Analyst agent...');
     const slimEsts = (engineerOut.estimates || []).map(slim.estimate);
+    const financeOut = await callClaude(
+      FINANCE_ANALYST,
+      `PM Recommendations:\n${JSON.stringify(slimRecs)}\n\nEngineer Estimates:\n${JSON.stringify(slimEsts)}`,
+      3000
+    ).catch(() => ({ models: [] }));
+
+    // 4. GTM Specialist
+    console.log('GTM Specialist agent...');
+    const slimFinance = (financeOut.models || []).map(slim.financeModel);
+    const gtmOut = await callClaude(
+      GTM_SPECIALIST,
+      `PM Recommendations:\n${JSON.stringify(slimRecs)}\n\nFinance Models:\n${JSON.stringify(slimFinance)}\n\nEngineer Estimates:\n${JSON.stringify(slimEsts)}`,
+      2000
+    ).catch(() => ({ gtmPlans: [] }));
+
+    // 5. Director
+    console.log('Director agent...');
+    const slimGtm = (gtmOut.gtmPlans || []).map(slim.gtm);
     const directorOut = await callClaude(
       DIRECTOR,
-      `PM Recommendations:\n${JSON.stringify(slimRecs)}\n\nEngineer Estimates:\n${JSON.stringify(slimEsts)}`,
+      `PM Recommendations:\n${JSON.stringify(slimRecs)}\n\nEngineer Estimates:\n${JSON.stringify(slimEsts)}\n\nFinance Models:\n${JSON.stringify(slimFinance)}\n\nGTM Plans:\n${JSON.stringify(slimGtm)}`,
       2000
     ).catch(() => ({ challenges: [], overallAssessment: '', topPriority: '', biggestConcern: '' }));
 
-    console.log('PM Rebuttal running...');
+    // 6. PM Rebuttal
+    console.log('PM Rebuttal agent...');
     const rebuttalOut = await callClaude(
       PM_REBUTTAL,
-      `Recommendations:\n${JSON.stringify(slimRecs)}\n\nThemes:\n${JSON.stringify(slimThemes)}\n\nChallenges:\n${JSON.stringify(directorOut.challenges || [])}`,
+      `Original recommendations:\n${JSON.stringify(slimRecs)}\n\nThemes (evidence):\n${JSON.stringify(slimThemes)}\n\nDirector challenges:\n${JSON.stringify(directorOut.challenges || [])}`,
       2000
     ).catch(() => ({ rebuttals: [], finalSummary: '' }));
 
+    // Calculate priority (P0/P1/P2/Cut) from combined PM + Finance scores
+    const recommendations = (pmOut.recommendations || []).map(r => {
+      const eng = (engineerOut.estimates || []).find(e => e.recommendationId === r.id);
+      const fin = (financeOut.models || []).find(m => m.recommendationId === r.id);
+      const gtm = (gtmOut.gtmPlans || []).find(g => g.recommendationId === r.id);
+      const dirChallenge = (directorOut.challenges || []).find(c => c.recommendationId === r.id);
+
+      // Priority scoring
+      const pmScore = ((r.userValue || 5) + (r.strategicFit || 5) + (r.confidenceScore || 5)) / 3;
+      const finScore = fin?.roi ? (fin.roi.includes('6x') || fin.roi.includes('8x') || fin.roi.includes('10x') ? 9 : fin.roi.includes('4x') || fin.roi.includes('5x') ? 7 : 5) : 5;
+      const gtmScore = gtm?.launchDifficulty === 'easy' ? 9 : gtm?.launchDifficulty === 'moderate' ? 7 : gtm?.launchDifficulty === 'hard' ? 4 : 3;
+      const combinedScore = (pmScore * 0.4) + (finScore * 0.4) + (gtmScore * 0.2);
+
+      let priority = 'P2';
+      if (dirChallenge?.directorStance === 'reject') priority = 'Cut';
+      else if (combinedScore >= 7.5) priority = 'P0';
+      else if (combinedScore >= 6) priority = 'P1';
+      else priority = 'P2';
+
+      return { ...r, priority, engineerData: eng, financeData: fin, gtmData: gtm };
+    });
+
     console.log('Analysis complete.');
     res.json({
-      recommendations: pmOut.recommendations || [],
+      recommendations,
       engineerEstimates: engineerOut.estimates || [],
       globalFlags: engineerOut.globalFlags || [],
+      financeModels: financeOut.models || [],
+      gtmPlans: gtmOut.gtmPlans || [],
       directorChallenges: directorOut.challenges || [],
       directorAssessment: directorOut.overallAssessment || '',
       directorTopPriority: directorOut.topPriority || '',
       directorBiggestConcern: directorOut.biggestConcern || '',
       rebuttals: rebuttalOut.rebuttals || [],
       finalSummary: rebuttalOut.finalSummary || '',
+      roadmapConflicts: pmOut.roadmapConflicts || [],
+      strategicGaps: pmOut.strategicGaps || [],
     });
   } catch (e) {
     console.error('Analysis error:', e.message);
     res.status(500).json({ error: 'Analysis failed: ' + e.message });
+  }
+});
+
+// ── Finance conversation ──────────────────────────────────────────────────────
+
+app.post('/api/finance/chat', async (req, res) => {
+  const { messages, recommendation, financeModel } = req.body;
+  if (!messages?.length) return res.status(400).json({ error: 'No messages' });
+
+  try {
+    const context = `You are analyzing the financial model for this recommendation:
+Title: ${recommendation?.title}
+Type: ${recommendation?.projectType}
+Current model: ${JSON.stringify(financeModel)}
+
+Engage with the PM's questions. Update assumptions when they provide new inputs. Show revised numbers clearly.`;
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      system: FINANCE_CONVERSATION + '\n\n' + context,
+      messages: messages.map(m => ({ role: m.role, content: m.content })),
+    });
+
+    res.json({ response: msg.content.map(b => b.text || '').join('') });
+  } catch (e) {
+    res.status(500).json({ error: 'Chat failed' });
   }
 });
 

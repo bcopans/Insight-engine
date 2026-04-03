@@ -20,42 +20,36 @@ export async function deleteDocument(id) {
   return res.json();
 }
 
-export async function streamSynthesize(handlers) {
-  const { onStatus, onComplete, onError } = handlers;
-  try {
-    onStatus({ message: 'Master Researcher synthesizing themes across all documents...' });
-    const res = await fetch(`${BASE}/api/synthesize`, { method: 'POST' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Synthesis failed');
-    }
-    const data = await res.json();
-    onComplete(data);
-  } catch (e) {
-    onError(e.message);
+export async function synthesizeThemes() {
+  const res = await fetch(`${BASE}/api/synthesize`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Synthesis failed');
   }
+  return res.json();
 }
 
-export async function streamAnalyze(themes, handlers) {
-  const { onAgent, onComplete, onError } = handlers;
-  try {
-    onAgent({ agent: 'pm', status: 'running', message: 'PM forming recommendations...' });
-    const res = await fetch(`${BASE}/api/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ themes }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Analysis failed');
-    }
-    onAgent({ agent: 'engineer', status: 'running', message: 'Engineer estimating effort...' });
-    const data = await res.json();
-    onAgent({ agent: 'rebuttal', status: 'done' });
-    onComplete(data);
-  } catch (e) {
-    onError(e.message);
+export async function runAnalysis(themes, roadmapItems = []) {
+  const res = await fetch(`${BASE}/api/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ themes, roadmapItems }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Analysis failed');
   }
+  return res.json();
+}
+
+export async function chatFinance(messages, recommendation, financeModel) {
+  const res = await fetch(`${BASE}/api/finance/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, recommendation, financeModel }),
+  });
+  if (!res.ok) throw new Error('Chat failed');
+  return res.json();
 }
 
 export async function parseRoadmap(file, text) {
