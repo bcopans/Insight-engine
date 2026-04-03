@@ -52,22 +52,22 @@ export async function chatFinance(messages, recommendation, financeModel) {
   return res.json();
 }
 
+export async function recalculateFinance(recommendation, assumptions) {
+  const res = await fetch(`${BASE}/api/finance/recalculate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recommendation, assumptions }),
+  });
+  if (!res.ok) throw new Error('Recalculate failed');
+  return res.json();
+}
+
 export async function parseRoadmap(file, text) {
   const form = new FormData();
   if (file) form.append('file', file);
   if (text) form.append('text', text);
   const res = await fetch(`${BASE}/api/parse-roadmap`, { method: 'POST', body: form });
   if (!res.ok) throw new Error('Parse failed');
-  return res.json();
-}
-
-export async function evaluateRoadmap(themes, roadmapItems) {
-  const res = await fetch(`${BASE}/api/evaluate-roadmap`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ themes, roadmapItems }),
-  });
-  if (!res.ok) throw new Error('Evaluation failed');
   return res.json();
 }
 
