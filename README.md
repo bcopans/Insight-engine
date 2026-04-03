@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Insight Engine — Setup Guide
 
 ## What you're deploying
@@ -86,3 +87,7 @@ Open your Vercel URL and the app is running. Sessions save to Supabase automatic
 Get it at: console.anthropic.com → API Keys → Create Key
 
 You'll need to add a payment method and add some credit ($5 minimum). Each analysis costs a fraction of a cent.
+=======
+# Insight-engine
+Research synthesizer and roadmap evaluation tool
+>>>>>>> fe473322a776ff006ef0813c880c3f93b43827ca
