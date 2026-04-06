@@ -22,30 +22,22 @@ export async function deleteDocument(id) {
 
 export async function synthesizeThemes() {
   const res = await fetch(`${BASE}/api/synthesize`, { method: 'POST' });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Synthesis failed');
-  }
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || 'Synthesis failed'); }
   return res.json();
 }
 
 export async function runAnalysis(themes, roadmapItems = []) {
   const res = await fetch(`${BASE}/api/analyze`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ themes, roadmapItems }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Analysis failed');
-  }
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || 'Analysis failed'); }
   return res.json();
 }
 
 export async function chatFinance(messages, recommendation, financeModel) {
   const res = await fetch(`${BASE}/api/finance/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages, recommendation, financeModel }),
   });
   if (!res.ok) throw new Error('Chat failed');
@@ -54,8 +46,7 @@ export async function chatFinance(messages, recommendation, financeModel) {
 
 export async function recalculateFinance(recommendation, assumptions) {
   const res = await fetch(`${BASE}/api/finance/recalculate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ recommendation, assumptions }),
   });
   if (!res.ok) throw new Error('Recalculate failed');
@@ -71,10 +62,30 @@ export async function parseRoadmap(file, text) {
   return res.json();
 }
 
+export async function saveDecision(recommendationId, title, decision, reason = '') {
+  const res = await fetch(`${BASE}/api/decisions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recommendationId, title, decision, reason }),
+  });
+  if (!res.ok) throw new Error('Save failed');
+  return res.json();
+}
+
+export async function getDecisions() {
+  const res = await fetch(`${BASE}/api/decisions`);
+  if (!res.ok) throw new Error('Fetch failed');
+  return res.json();
+}
+
+export async function getLogs() {
+  const res = await fetch(`${BASE}/api/logs`);
+  if (!res.ok) throw new Error('Fetch failed');
+  return res.json();
+}
+
 export async function saveSession(session) {
   const res = await fetch(`${BASE}/api/sessions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(session),
   });
   if (!res.ok) throw new Error('Save failed');
