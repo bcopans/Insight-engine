@@ -4,7 +4,7 @@ import {
   synthesizeThemes, runAnalysis,
   chatFinance, recalculateFinance,
   parseRoadmap, saveDecision, getDecisions, getLogs,
-  saveSession, getSessions, deleteSession
+  saveSession, getSessions, deleteSession, signOut
 } from './api';
 import './App.css';
 
@@ -166,7 +166,7 @@ function LeftNav({active, setActive, hasThemes, hasAnalysis, docCount, themeCoun
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
-export default function App(){
+export default function App({ session }){
   const [view, setView] = useState('documents');
 
   // Docs
@@ -398,6 +398,14 @@ export default function App(){
               {saveStatus==='saving'?'Saving...':saveStatus==='saved'?'✓ Saved':'Save Session'}
             </button>
           )}
+          <div style={{display:'flex',alignItems:'center',gap:8,paddingLeft:8,borderLeft:'1px solid var(--border)'}}>
+            <div style={{fontSize:12,color:'var(--text-2)',maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+              {session?.user?.email}
+            </div>
+            <button className="btn-ghost" style={{fontSize:12,color:'var(--text-3)'}} onClick={signOut} title="Sign out">
+              ↩ Sign out
+            </button>
+          </div>
         </div>
       </header>
 

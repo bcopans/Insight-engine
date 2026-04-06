@@ -14,12 +14,40 @@ const {
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+
+// Service role client for admin ops (bypasses RLS)
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Auth middleware ───────────────────────────────────────────────────────────
+async function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing authorization token' });
+  }
+  const token = authHeader.slice(7);
+  try {
+    // Verify token with Supabase and get user
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
+    req.userId = user.id;
+    req.userEmail = user.email;
+    // Create a user-scoped Supabase client (RLS enforced)
+    req.db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: `Bearer ${token}` } }
+    });
+    next();
+  } catch (e) {
+    res.status(401).json({ error: 'Auth failed' });
+  }
+}
+
+// ── Claude helper ─────────────────────────────────────────────────────────────
 async function callClaude(system, userMessage, maxTokens) {
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -48,10 +76,10 @@ async function extractText(file) {
   return msg.content.map(b => b.text || '').join('');
 }
 
-async function writeLog(action, detail, metadata = {}) {
+async function writeLog(db, userId, action, detail, metadata = {}) {
   try {
-    await supabase.from('logs').insert([{ action, detail, metadata, created_at: new Date() }]);
-  } catch (e) { console.error('Log write failed:', e.message); }
+    await db.from('logs').insert([{ user_id: userId, action, detail, metadata }]);
+  } catch (e) { console.error('Log failed:', e.message); }
 }
 
 const slim = {
@@ -63,20 +91,21 @@ const slim = {
 };
 
 // ── Documents ─────────────────────────────────────────────────────────────────
-app.post('/api/upload', upload.array('files', 20), async (req, res) => {
+app.post('/api/upload', requireAuth, upload.array('files', 20), async (req, res) => {
   if (!req.files?.length) return res.status(400).json({ error: 'No files' });
   const results = [];
   for (const file of req.files) {
     try {
       const text = await extractText(file);
       const out = await callClaude(RESEARCHER_SINGLE, `Document: ${file.originalname}\n\nContent:\n${text.slice(0, 5000)}`, 2000);
-      const { data, error } = await supabase.from('documents').insert([{
+      const { data, error } = await req.db.from('documents').insert([{
+        user_id: req.userId,
         name: file.originalname, extracted_text: text.slice(0, 30000),
         themes: out.themes || [], document_summary: out.documentSummary || '',
         key_source: out.keySource || '', file_size: file.size, mime_type: file.mimetype,
       }]).select().single();
       if (error) throw error;
-      await writeLog('upload', `Uploaded "${file.originalname}"`, { documentId: data.id, themeCount: out.themes?.length || 0 });
+      await writeLog(req.db, req.userId, 'upload', `Uploaded "${file.originalname}"`, { documentId: data.id });
       results.push({ id: data.id, name: data.name, themes: data.themes, documentSummary: data.document_summary, keySource: data.key_source, uploadedAt: data.created_at });
     } catch (e) {
       console.error('Upload error:', file.originalname, e.message);
@@ -86,27 +115,33 @@ app.post('/api/upload', upload.array('files', 20), async (req, res) => {
   res.json(results);
 });
 
-app.get('/api/documents', async (req, res) => {
+app.get('/api/documents', requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase.from('documents').select('id, name, themes, document_summary, key_source, file_size, created_at').order('created_at', { ascending: false });
+    const { data, error } = await req.db.from('documents')
+      .select('id, name, themes, document_summary, key_source, file_size, created_at')
+      .eq('user_id', req.userId)
+      .order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data || []);
   } catch { res.status(500).json({ error: 'Fetch failed' }); }
 });
 
-app.delete('/api/documents/:id', async (req, res) => {
+app.delete('/api/documents/:id', requireAuth, async (req, res) => {
   try {
-    const { data } = await supabase.from('documents').select('name').eq('id', req.params.id).single();
-    await supabase.from('documents').delete().eq('id', req.params.id);
-    await writeLog('delete_document', `Removed "${data?.name || req.params.id}"`);
+    const { data } = await req.db.from('documents').select('name').eq('id', req.params.id).eq('user_id', req.userId).single();
+    await req.db.from('documents').delete().eq('id', req.params.id).eq('user_id', req.userId);
+    await writeLog(req.db, req.userId, 'delete_document', `Removed "${data?.name}"`);
     res.json({ success: true });
   } catch { res.status(500).json({ error: 'Delete failed' }); }
 });
 
 // ── Synthesize ────────────────────────────────────────────────────────────────
-app.post('/api/synthesize', async (req, res) => {
+app.post('/api/synthesize', requireAuth, async (req, res) => {
   try {
-    const { data: docs, error } = await supabase.from('documents').select('name, themes, document_summary, key_source').order('created_at', { ascending: true });
+    const { data: docs, error } = await req.db.from('documents')
+      .select('name, themes, document_summary, key_source')
+      .eq('user_id', req.userId)
+      .order('created_at', { ascending: true });
     if (error) return res.status(500).json({ error: 'Database error' });
     if (!docs?.length) return res.status(400).json({ error: 'No documents found. Please upload documents first.' });
 
@@ -123,7 +158,7 @@ app.post('/api/synthesize', async (req, res) => {
     }));
 
     const out = await callClaude(MASTER_RESEARCHER, `Synthesize themes from ${docs.length} documents:\n\n${JSON.stringify(input)}`, 4000);
-    await writeLog('synthesize', `Synthesized ${docs.length} documents → ${out.themes?.length || 0} themes`);
+    await writeLog(req.db, req.userId, 'synthesize', `Synthesized ${docs.length} documents → ${out.themes?.length || 0} themes`);
     res.json(out);
   } catch (e) {
     console.error('Synthesize error:', e.message);
@@ -132,7 +167,7 @@ app.post('/api/synthesize', async (req, res) => {
 });
 
 // ── Full analysis ─────────────────────────────────────────────────────────────
-app.post('/api/analyze', async (req, res) => {
+app.post('/api/analyze', requireAuth, async (req, res) => {
   const { themes, roadmapItems = [] } = req.body;
   if (!themes?.length) return res.status(400).json({ error: 'No themes' });
   const slimThemes = themes.map(slim.theme);
@@ -161,7 +196,7 @@ app.post('/api/analyze', async (req, res) => {
         return { ...r, priority, eng, fin, gtm };
       });
 
-    await writeLog('analyze', `Analysis complete — ${recommendations.length} recommendations generated`);
+    await writeLog(req.db, req.userId, 'analyze', `Analysis complete — ${recommendations.length} recommendations`);
     res.json({
       recommendations, directorChallenges: dirOut.challenges || [],
       directorAssessment: dirOut.overallAssessment || '', directorTopPriority: dirOut.topPriority || '',
@@ -176,7 +211,7 @@ app.post('/api/analyze', async (req, res) => {
 });
 
 // ── Finance ───────────────────────────────────────────────────────────────────
-app.post('/api/finance/chat', async (req, res) => {
+app.post('/api/finance/chat', requireAuth, async (req, res) => {
   const { messages, recommendation, financeModel } = req.body;
   if (!messages?.length) return res.status(400).json({ error: 'No messages' });
   try {
@@ -187,51 +222,31 @@ app.post('/api/finance/chat', async (req, res) => {
       messages: messages.map(m => ({ role: m.role, content: m.content })),
     });
     const response = msg.content.map(b => b.text || '').join('');
-    await writeLog('finance_chat', `Finance chat on "${recommendation?.title}"`);
+    await writeLog(req.db, req.userId, 'finance_chat', `Finance chat on "${recommendation?.title}"`);
     res.json({ response });
   } catch { res.status(500).json({ error: 'Chat failed' }); }
 });
 
-app.post('/api/finance/recalculate', async (req, res) => {
+app.post('/api/finance/recalculate', requireAuth, async (req, res) => {
   const { recommendation, assumptions } = req.body;
   try {
     const out = await callClaude(FINANCE_CONVERSATION,
       `Recalculate financial impact for: ${recommendation?.title}\nType: ${recommendation?.projectType}\nUpdated assumptions:\n${JSON.stringify(assumptions)}\nReturn JSON: { "headline": "updated impact", "calculationLogic": "how you got there" }`, 500);
-    await writeLog('finance_recalculate', `Recalculated model for "${recommendation?.title}"`, { assumptions });
+    await writeLog(req.db, req.userId, 'finance_recalculate', `Recalculated model for "${recommendation?.title}"`);
     res.json(out);
   } catch { res.status(500).json({ error: 'Recalculate failed' }); }
 });
 
-// ── Decision log (accept/reject) ──────────────────────────────────────────────
-app.post('/api/decisions', async (req, res) => {
-  const { recommendationId, title, decision, reason } = req.body;
-  try {
-    const { data, error } = await supabase.from('decisions').insert([{ recommendation_id: recommendationId, title, decision, reason }]).select().single();
-    if (error) throw error;
-    await writeLog('decision', `${decision === 'accept' ? '✓ Accepted' : '✗ Rejected'} "${title}"`, { reason });
-    res.json(data);
-  } catch { res.status(500).json({ error: 'Save failed' }); }
-});
-
-app.get('/api/decisions', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('decisions').select('*').order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json(data || []);
-  } catch { res.status(500).json({ error: 'Fetch failed' }); }
-});
-
 // ── Roadmap ───────────────────────────────────────────────────────────────────
-app.post('/api/parse-roadmap', upload.single('file'), async (req, res) => {
+app.post('/api/parse-roadmap', requireAuth, upload.single('file'), async (req, res) => {
   try {
     let text = req.body.text || '';
     if (req.file) text = await extractText(req.file);
     if (!text.trim()) return res.status(400).json({ error: 'No text provided' });
-    // Truncate to avoid token overflow
     const truncated = text.slice(0, 8000);
     const items = await callClaude(ROADMAP_PARSER, `Parse this roadmap into a JSON array:\n\n${truncated}`, 3000);
     const arr = Array.isArray(items) ? items : (items?.items || []);
-    await writeLog('parse_roadmap', `Parsed roadmap — ${arr.length} items`);
+    await writeLog(req.db, req.userId, 'parse_roadmap', `Parsed roadmap — ${arr.length} items`);
     res.json(arr);
   } catch (e) {
     console.error('Roadmap parse error:', e.message);
@@ -239,36 +254,60 @@ app.post('/api/parse-roadmap', upload.single('file'), async (req, res) => {
   }
 });
 
-// ── Logs ──────────────────────────────────────────────────────────────────────
-app.get('/api/logs', async (req, res) => {
+// ── Decisions ─────────────────────────────────────────────────────────────────
+app.post('/api/decisions', requireAuth, async (req, res) => {
+  const { recommendationId, title, decision, reason } = req.body;
   try {
-    const { data, error } = await supabase.from('logs').select('*').order('created_at', { ascending: false }).limit(200);
+    const { data, error } = await req.db.from('decisions').insert([{
+      user_id: req.userId, recommendation_id: recommendationId, title, decision, reason
+    }]).select().single();
+    if (error) throw error;
+    await writeLog(req.db, req.userId, 'decision', `${decision === 'accept' ? '✓ Accepted' : '✗ Rejected'} "${title}"`, { reason });
+    res.json(data);
+  } catch { res.status(500).json({ error: 'Save failed' }); }
+});
+
+app.get('/api/decisions', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await req.db.from('decisions')
+      .select('*').eq('user_id', req.userId).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch { res.status(500).json({ error: 'Fetch failed' }); }
+});
+
+// ── Logs ──────────────────────────────────────────────────────────────────────
+app.get('/api/logs', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await req.db.from('logs')
+      .select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(200);
     if (error) throw error;
     res.json(data || []);
   } catch { res.status(500).json({ error: 'Fetch failed' }); }
 });
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
-app.post('/api/sessions', async (req, res) => {
+app.post('/api/sessions', requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase.from('sessions').insert([req.body]).select().single();
+    const { data, error } = await req.db.from('sessions').insert([{ ...req.body, user_id: req.userId }]).select().single();
     if (error) throw error;
-    await writeLog('save_session', 'Session saved');
+    await writeLog(req.db, req.userId, 'save_session', 'Session saved');
     res.json(data);
   } catch { res.status(500).json({ error: 'Save failed' }); }
 });
 
-app.get('/api/sessions', async (req, res) => {
+app.get('/api/sessions', requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase.from('sessions').select('*').order('created_at', { ascending: false });
+    const { data, error } = await req.db.from('sessions')
+      .select('*').eq('user_id', req.userId).order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data || []);
   } catch { res.status(500).json({ error: 'Fetch failed' }); }
 });
 
-app.delete('/api/sessions/:id', async (req, res) => {
+app.delete('/api/sessions/:id', requireAuth, async (req, res) => {
   try {
-    await supabase.from('sessions').delete().eq('id', req.params.id);
+    await req.db.from('sessions').delete().eq('id', req.params.id).eq('user_id', req.userId);
     res.json({ success: true });
   } catch { res.status(500).json({ error: 'Delete failed' }); }
 });
