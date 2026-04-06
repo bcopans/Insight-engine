@@ -328,9 +328,17 @@ export default function App(){
     setParsingRoadmap(true);
     try{
       const items=await parseRoadmap(roadmapFile,roadmapText);
-      setRoadmapItems(Array.isArray(items)?items:[]); setRoadmapParsed(true);
-      showToast(`✓ ${items.length} roadmap items parsed`);
-    }catch{}
+      const arr=Array.isArray(items)?items:[];
+      if(arr.length===0){
+        showToast('No roadmap items found — try pasting text instead');
+      } else {
+        setRoadmapItems(arr);
+        setRoadmapParsed(true);
+        showToast(`✓ ${arr.length} roadmap items parsed`);
+      }
+    }catch(e){
+      showToast('Parse failed: ' + (e.message||'unknown error'));
+    }
     setParsingRoadmap(false);
   };
 

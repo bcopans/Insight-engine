@@ -226,10 +226,17 @@ app.post('/api/parse-roadmap', upload.single('file'), async (req, res) => {
   try {
     let text = req.body.text || '';
     if (req.file) text = await extractText(req.file);
-    const items = await callClaude(ROADMAP_PARSER, `Parse this roadmap:\n\n${text}`, 2000);
-    await writeLog('parse_roadmap', `Parsed roadmap — ${Array.isArray(items) ? items.length : 0} items`);
-    res.json(Array.isArray(items) ? items : []);
-  } catch { res.status(500).json({ error: 'Parse failed' }); }
+    if (!text.trim()) return res.status(400).json({ error: 'No text provided' });
+    // Truncate to avoid token overflow
+    const truncated = text.slice(0, 8000);
+    const items = await callClaude(ROADMAP_PARSER, `Parse this roadmap into a JSON array:\n\n${truncated}`, 3000);
+    const arr = Array.isArray(items) ? items : (items?.items || []);
+    await writeLog('parse_roadmap', `Parsed roadmap — ${arr.length} items`);
+    res.json(arr);
+  } catch (e) {
+    console.error('Roadmap parse error:', e.message);
+    res.status(500).json({ error: 'Parse failed: ' + e.message });
+  }
 });
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
