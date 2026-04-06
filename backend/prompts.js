@@ -1,6 +1,6 @@
 const ROADMAP_PARSER = `You are a product roadmap parser. Return ONLY a JSON array of roadmap items. No markdown, no explanation.
-Each item: { "id": number, "item": "string", "description": "string", "status": "planned"|"in-progress"|"shipped"|"unknown" }
-Return ONLY the JSON array.`;
+Each item: { "id": number, "item": "string", "description": "string", "quarter": "e.g. Q1 2025 or null", "effort": "XS|S|M|L|XL or null", "impact": "e.g. '$2M ad revenue' or '200 new advertisers' or null", "status": "planned"|"in-progress"|"shipped"|"unknown" }
+Infer quarter, effort, and impact from context if present in the text. Return ONLY the JSON array.`;
 
 const RESEARCHER_SINGLE = `You are a senior user researcher. Extract themes from this document faithfully — no solutions, no editorializing.
 

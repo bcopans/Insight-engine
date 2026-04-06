@@ -222,6 +222,9 @@ export default function App(){
   const [expandedUnknowns, setExpandedUnknowns] = useState({});
   const [expandedChallenges, setExpandedChallenges] = useState({});
   const [activeModelRec, setActiveModelRec] = useState(null);
+  const [expandedPriority, setExpandedPriority] = useState({});
+  const [expandedScores, setExpandedScores] = useState({});
+  const [synthKey, setSynthKey]         = useState(0);
 
   const fileRef = useRef(null);
   const roadmapRef = useRef(null);
@@ -271,6 +274,7 @@ export default function App(){
       clearInterval(synthInt.current); clearInterval(elapsedInt.current);
       setExecSummary(data.execSummary||null);
       setThemes(data.themes||[]); setQuestions(data.probingQuestions||[]); setResearchGaps(data.researchGaps||[]);
+      setSynthKey(k=>k+1);
       setSynthesizing(false); setView('exec');
       showToast(`✓ ${data.themes?.length||0} themes synthesized`);
     }catch(e){
@@ -507,13 +511,27 @@ export default function App(){
               {hasAnalysis&&(
                 <div style={{marginTop:16,display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
                   {['P0','P1','P2'].map(p=>{
-                    const count=recommendations.filter(r=>r.priority===p).length;
-                    if(!count) return null;
+                    const recs=recommendations.filter(r=>r.priority===p);
+                    if(!recs.length) return null;
                     const s=PRIORITY_STYLE[p];
-                    return <div key={p} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r)',padding:'12px 16px',textAlign:'center'}}>
-                      <div className={`p-tag ${s.cls}`} style={{fontSize:18,padding:'4px 12px',marginBottom:4,display:'inline-flex'}}>{s.label}</div>
-                      <div style={{fontSize:24,fontWeight:800,color:'var(--text-1)'}}>{count}</div>
-                      <div style={{fontSize:11,color:'var(--text-3)',textTransform:'uppercase',fontWeight:600}}>Recommendations</div>
+                    const isOpen=expandedPriority[p];
+                    return <div key={p} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r)',overflow:'hidden'}}>
+                      <div style={{padding:'12px 16px',textAlign:'center',cursor:'pointer',userSelect:'none'}} onClick={()=>setExpandedPriority(prev=>({...prev,[p]:!prev[p]}))}>
+                        <div className={`p-tag ${s.cls}`} style={{fontSize:18,padding:'4px 12px',marginBottom:4,display:'inline-flex'}}>{s.label}</div>
+                        <div style={{fontSize:24,fontWeight:800,color:'var(--text-1)'}}>{recs.length}</div>
+                        <div style={{fontSize:11,color:'var(--text-3)',textTransform:'uppercase',fontWeight:600}}>Recommendations</div>
+                        <div style={{fontSize:11,color:'var(--text-3)',marginTop:4}}>{isOpen?'▲ Hide':'▼ Show'}</div>
+                      </div>
+                      {isOpen&&(
+                        <div style={{borderTop:'1px solid var(--border)',background:'var(--surface-2)'}} className="fade-in">
+                          {recs.map(r=>(
+                            <div key={r.id} style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',cursor:'pointer'}} onClick={()=>{setView('recommendations');}}>
+                              <div style={{fontSize:13,fontWeight:600,color:'var(--text-1)',marginBottom:2}}>#{r.stackRank} {r.title}</div>
+                              {r.fin?.headline&&<div style={{fontSize:11,color:'var(--green)'}}>{r.fin.headline}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>;
                   })}
                 </div>
@@ -623,7 +641,7 @@ export default function App(){
 
           {/* ── FOLLOW-UP ── */}
           {view==='followup'&&(
-            <div className="page fade-in">
+            <div className="page fade-in" key={synthKey}>
               <h1 style={{fontSize:20,fontWeight:700,marginBottom:4}}>Follow-up Questions</h1>
               <p style={{fontSize:13,color:'var(--text-2)',marginBottom:20}}>Ask these in your next research session to close gaps and strengthen weak signals.</p>
               {questions.map((q,i)=>(
@@ -709,9 +727,21 @@ export default function App(){
                     </div>
 
                     <div className="rec-scores">
-                      <div className="score-cell"><div className="score-val" style={{color:'var(--blue)'}}>{r.userValue}/10</div><div className="score-label">User Value</div></div>
-                      <div className="score-cell"><div className="score-val" style={{color:'var(--purple)'}}>{r.strategicFit}/10</div><div className="score-label">Strategic Fit</div></div>
-                      <div className="score-cell"><div className="score-val" style={{color:'#0891b2'}}>{r.confidenceScore}/10</div><div className="score-label">Confidence</div></div>
+                      <div className="score-cell" style={{cursor:'pointer'}} onClick={()=>setExpandedScores(p=>({...p,[`${r.id}-uv`]:!p[`${r.id}-uv`]}))}>
+                        <div className="score-val" style={{color:'var(--blue)'}}>{r.userValue}/10</div>
+                        <div className="score-label">User Value ▾</div>
+                        {expandedScores[`${r.id}-uv`]&&<div style={{fontSize:11,color:'var(--text-2)',marginTop:4,lineHeight:1.5,textAlign:'left'}} className="fade-in">How strongly users expressed this need across research sources.</div>}
+                      </div>
+                      <div className="score-cell" style={{cursor:'pointer'}} onClick={()=>setExpandedScores(p=>({...p,[`${r.id}-sf`]:!p[`${r.id}-sf`]}))}>
+                        <div className="score-val" style={{color:'var(--purple)'}}>{r.strategicFit}/10</div>
+                        <div className="score-label">Strategic Fit ▾</div>
+                        {expandedScores[`${r.id}-sf`]&&<div style={{fontSize:11,color:'var(--text-2)',marginTop:4,lineHeight:1.5,textAlign:'left'}} className="fade-in">Alignment with business goals, Amazon positioning, and competitive advantage.</div>}
+                      </div>
+                      <div className="score-cell" style={{cursor:'pointer'}} onClick={()=>setExpandedScores(p=>({...p,[`${r.id}-cf`]:!p[`${r.id}-cf`]}))}>
+                        <div className="score-val" style={{color:'#0891b2'}}>{r.confidenceScore}/10</div>
+                        <div className="score-label">Confidence ▾</div>
+                        {expandedScores[`${r.id}-cf`]&&<div style={{fontSize:11,color:'var(--text-2)',marginTop:4,lineHeight:1.5,textAlign:'left'}} className="fade-in">Strength of evidence from research — signal clarity, source count, quote quality.</div>}
+                      </div>
                     </div>
 
                     <div className="rec-section">
@@ -863,21 +893,33 @@ export default function App(){
                 <div className="panel" style={{marginBottom:20}}>
                   <div className="panel-hd">
                     <span className="panel-title">Current Roadmap ({roadmapItems.length} items)</span>
-                    <button className="btn btn-secondary btn-xs" onClick={()=>setExpandedRoadmapItems(p=>{const all=roadmapItems.every(r=>p[r.id]);return roadmapItems.reduce((acc,r)=>({...acc,[r.id]:!all}),{});})}>Toggle All</button>
+                    <button className="btn btn-secondary btn-xs" onClick={()=>{setRoadmapParsed(false);setRoadmapItems([]);}}>Change</button>
                   </div>
-                  {roadmapItems.map(r=>(
-                    <div key={r.id} className="roadmap-item" style={{cursor:'pointer'}} onClick={()=>setExpandedRoadmapItems(p=>({...p,[r.id]:!p[r.id]}))}>
-                      <div className={`roadmap-status ${STATUS_DOT[r.status]||STATUS_DOT.unknown}`}/>
-                      <span style={{flex:1,fontWeight:500,color:'var(--text-1)'}}>{r.item}</span>
-                      <Badge cls="b-gray" label={r.status}/>
-                      <span style={{fontSize:11,color:'var(--text-3)'}}>{expandedRoadmapItems[r.id]?'▲':'▼'}</span>
-                    </div>
-                  ))}
-                  {roadmapItems.filter(r=>expandedRoadmapItems[r.id]).map(r=>(
-                    <div key={`${r.id}-detail`} style={{padding:'8px 14px 10px 30px',background:'var(--surface-2)',fontSize:12,color:'var(--text-2)',borderBottom:'1px solid var(--border)'}}>
-                      {r.description||'No description'}
-                    </div>
-                  ))}
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+                    <thead>
+                      <tr style={{borderBottom:'2px solid var(--border)'}}>
+                        <th style={{textAlign:'left',padding:'6px 10px',fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.06em'}}>Initiative</th>
+                        <th style={{textAlign:'left',padding:'6px 10px',fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.06em',width:100}}>Quarter</th>
+                        <th style={{textAlign:'left',padding:'6px 10px',fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.06em',width:80}}>Effort</th>
+                        <th style={{textAlign:'left',padding:'6px 10px',fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.06em',width:120}}>Impact</th>
+                        <th style={{textAlign:'left',padding:'6px 10px',fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.06em',width:80}}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {roadmapItems.map((r,i)=>(
+                        <tr key={r.id} style={{borderBottom:'1px solid var(--border)',background:i%2===0?'var(--surface)':'var(--surface-2)'}}>
+                          <td style={{padding:'8px 10px',fontWeight:500,color:'var(--text-1)'}}>
+                            {r.item}
+                            {r.description&&<div style={{fontSize:11,color:'var(--text-3)',marginTop:2}}>{r.description}</div>}
+                          </td>
+                          <td style={{padding:'8px 10px',color:'var(--text-2)'}}>{r.quarter||'—'}</td>
+                          <td style={{padding:'8px 10px'}}>{r.effort?<Badge cls="b-gray" label={r.effort}/>:'—'}</td>
+                          <td style={{padding:'8px 10px',color:r.impact?'var(--green)':'var(--text-3)',fontSize:12,fontWeight:r.impact?600:400}}>{r.impact||'—'}</td>
+                          <td style={{padding:'8px 10px'}}><Badge cls={r.status==='shipped'?'b-green':r.status==='in-progress'?'b-yellow':r.status==='planned'?'b-blue':'b-gray'} label={r.status||'unknown'}/></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               ):(
                 <div className="panel" style={{marginBottom:20}}>
