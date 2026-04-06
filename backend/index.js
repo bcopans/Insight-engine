@@ -32,18 +32,18 @@ async function requireAuth(req, res, next) {
   }
   const token = authHeader.slice(7);
   try {
-    // Verify token with Supabase and get user
     const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
-    if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
+    if (error) return res.status(401).json({ error: 'Auth error: ' + error.message });
+    if (!user) return res.status(401).json({ error: 'No user found for token' });
     req.userId = user.id;
     req.userEmail = user.email;
-    // Create a user-scoped Supabase client (RLS enforced)
     req.db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
       global: { headers: { Authorization: `Bearer ${token}` } }
     });
     next();
   } catch (e) {
-    res.status(401).json({ error: 'Auth failed' });
+    console.error('Auth middleware error:', e.message);
+    res.status(401).json({ error: 'Auth failed: ' + e.message });
   }
 }
 
@@ -121,9 +121,9 @@ app.get('/api/documents', requireAuth, async (req, res) => {
       .select('id, name, themes, document_summary, key_source, file_size, created_at')
       .eq('user_id', req.userId)
       .order('created_at', { ascending: false });
-    if (error) throw error;
+    if (error) return res.status(500).json({ error: 'DB error: ' + error.message });
     res.json(data || []);
-  } catch { res.status(500).json({ error: 'Fetch failed' }); }
+  } catch (e) { res.status(500).json({ error: 'Fetch failed: ' + e.message }); }
 });
 
 app.delete('/api/documents/:id', requireAuth, async (req, res) => {
